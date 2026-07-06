@@ -1,0 +1,18 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="资质通 Logo">
+  <!-- 标书文档（背后的要求文本） -->
+  <g transform="rotate(-8 88 82)">
+    <rect x="46" y="30" width="84" height="104" rx="8" fill="#FBFAF7" stroke="#334155" stroke-width="4"/>
+    <path d="M110 30 L130 30 L130 50 Z" fill="#E2E8F0" stroke="#334155" stroke-width="4" stroke-linejoin="round"/>
+    <line x1="58" y1="58" x2="104" y2="58" stroke="#94A3B8" stroke-width="5" stroke-linecap="round"/>
+    <line x1="58" y1="72" x2="112" y2="72" stroke="#94A3B8" stroke-width="5" stroke-linecap="round"/>
+    <line x1="58" y1="86" x2="96" y2="86" stroke="#94A3B8" stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <!-- 核验印章（资质核对通过） -->
+  <circle cx="118" cy="118" r="58" fill="none" stroke="#0F766E" stroke-width="6" stroke-dasharray="4 7"/>
+  <circle cx="118" cy="118" r="46" fill="#14B8A6"/>
+  <path d="M98 118 L112 132 L140 102" fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 红线待办提示点 -->
+  <circle cx="168" cy="70" r="9" fill="#F59E0B"/>
+</svg>
