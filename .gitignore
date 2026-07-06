@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 数据目录（运行时生成）
+data/
+backend/output/
+output/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志
+*.log
+logs/
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 本地 AI/IDE 工具状态
+.claude/
+.workbuddy/
+.codegraph/
+
+# 本地真实业务资料（开源前请只保留脱敏样例）
+JSZC-320508-JDJS-G2026-0002采购文件.doc
+samples/JSZC-320508-JDJS-G2026-0002采购文件.pdf
+samples/*真实*
+samples/*原始*
+
+# 数据库文件（已在 data/ 下，双重保险）
+*.db
+*.db-journal

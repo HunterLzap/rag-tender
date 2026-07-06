@@ -1,0 +1,41 @@
+# Web 框架
+fastapi==0.115.0
+uvicorn==0.49.0
+python-multipart==0.0.32
+
+# 数据验证
+pydantic==2.9.0
+
+# 数据库
+aiosqlite==0.20.0
+
+# HTTP 客户端（API 测试连接）
+httpx==0.27.0
+
+# API Key 加密存储
+cryptography==49.0.0
+
+# RAG 核心（已安装，列出固定版本）
+raganything==1.3.1
+lightrag-hku==1.5.3
+mineru==3.4.0
+paddleocr==3.7.0
+paddlepaddle==3.3.1
+
+# 文档处理
+python-docx==1.1.2
+openpyxl==3.1.5
+pdfplumber==0.11.10
+filetype==1.2.0
+
+# PyTorch（CPU 版，已安装）
+torch==2.12.1
+
+# 工具
+pyyaml==6.0.2
+
+pypdf
+PyPDF2
+pdf2image
+docling
+pypdfium2

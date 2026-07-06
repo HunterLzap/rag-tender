@@ -1,0 +1,94 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">标书分析资质智能匹配软件图标</title>
+  <desc id="desc">紫色书本上叠放放大镜的矢量图标，表达标书分析、资质检索和智能匹配。</desc>
+
+  <defs>
+    <linearGradient id="bookCover" x1="271" y1="239" x2="713" y2="700" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B76CFF"/>
+      <stop offset="0.48" stop-color="#7B2CFF"/>
+      <stop offset="1" stop-color="#4B16B8"/>
+    </linearGradient>
+
+    <linearGradient id="bookSpine" x1="204" y1="300" x2="381" y2="731" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A75CFF"/>
+      <stop offset="1" stop-color="#42109F"/>
+    </linearGradient>
+
+    <linearGradient id="lensGradient" x1="557" y1="234" x2="759" y2="555" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F6ECFF"/>
+      <stop offset="0.42" stop-color="#B879FF"/>
+      <stop offset="1" stop-color="#6D24E8"/>
+    </linearGradient>
+
+    <linearGradient id="handleGradient" x1="715" y1="531" x2="884" y2="742" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A96BFF"/>
+      <stop offset="1" stop-color="#4A12B8"/>
+    </linearGradient>
+
+    <linearGradient id="pageGradient" x1="266" y1="648" x2="728" y2="704" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FAF6FF"/>
+      <stop offset="1" stop-color="#D8B7FF"/>
+    </linearGradient>
+
+    <filter id="softShadow" x="144" y="164" width="764" height="674" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="30"/>
+      <feGaussianBlur stdDeviation="32"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.247 0 0 0 0 0.059 0 0 0 0 0.565 0 0 0 0.30 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow" result="shape"/>
+    </filter>
+
+    <filter id="innerGlow" x="0" y="0" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#softShadow)">
+    <!-- Book body -->
+    <path d="M238 248C238 218.177 262.177 194 292 194H650C673.748 194 693 213.252 693 237V647C693 670.748 673.748 690 650 690H292C262.177 690 238 665.823 238 636V248Z" fill="url(#bookCover)"/>
+    <path d="M238 248C238 218.177 262.177 194 292 194H362V690H292C262.177 690 238 665.823 238 636V248Z" fill="url(#bookSpine)" opacity="0.95"/>
+
+    <!-- Book top highlight -->
+    <path d="M306 238H635C647.15 238 657 247.85 657 260V602C657 611.389 649.389 619 640 619H306C296.611 619 289 611.389 289 602V255C289 245.611 296.611 238 306 238Z" fill="white" opacity="0.09"/>
+    <path d="M308 247V585" stroke="#E7C9FF" stroke-width="15" stroke-linecap="round" opacity="0.54"/>
+    <path d="M342 236V595" stroke="#2A075F" stroke-width="20" stroke-linecap="round" opacity="0.20"/>
+
+    <!-- Pages -->
+    <path d="M282 620H704C722.225 620 737 634.775 737 653C737 671.225 722.225 686 704 686H282C259.909 686 242 668.091 242 646C242 631.641 253.641 620 268 620H282Z" fill="#3C0D8D"/>
+    <path d="M287 637H705C713.837 637 721 644.163 721 653C721 661.837 713.837 669 705 669H287C278.163 669 271 661.837 271 653C271 644.163 278.163 637 287 637Z" fill="url(#pageGradient)"/>
+    <path d="M307 649H690" stroke="#AE7CFF" stroke-width="7" stroke-linecap="round" opacity="0.45"/>
+    <path d="M308 663H675" stroke="#AE7CFF" stroke-width="5" stroke-linecap="round" opacity="0.35"/>
+
+    <!-- Bookmark -->
+    <path d="M355 649H446V760L401 725L355 760V649Z" fill="#8132F2"/>
+    <path d="M355 649H446V674H355V649Z" fill="#A263FF" opacity="0.55"/>
+
+    <!-- Magnifier outer ring -->
+    <circle cx="636" cy="386" r="155" fill="#8E44FF"/>
+    <circle cx="636" cy="386" r="133" fill="#37107F"/>
+    <circle cx="636" cy="386" r="113" fill="url(#lensGradient)"/>
+    <path d="M553 452C573 489 607 505 653 499C702 492 732 463 743 421C723 432 694 444 657 458C615 474 580 472 553 452Z" fill="#4B14B2" opacity="0.34"/>
+
+    <!-- Lens shine -->
+    <path d="M551 314C574 285 606 270 648 269" stroke="white" stroke-width="25" stroke-linecap="round" opacity="0.90"/>
+    <circle cx="531" cy="354" r="17" fill="white" opacity="0.90"/>
+
+    <!-- Handle -->
+    <path d="M731 495L873 636C888.621 651.621 888.621 676.948 873 692.569L863.569 702C847.948 717.621 822.621 717.621 807 702L665 561L731 495Z" fill="#37107F"/>
+    <path d="M738 515L856 633C866.493 643.493 866.493 660.507 856 671L851 676C840.507 686.493 823.493 686.493 813 676L695 558L738 515Z" fill="url(#handleGradient)"/>
+    <path d="M761 541L826 606" stroke="#D5B0FF" stroke-width="16" stroke-linecap="round" opacity="0.34"/>
+
+    <!-- Smart matching detail: check mark inside lens -->
+    <path d="M594 393L623 421L682 352" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"/>
+    <circle cx="582" cy="450" r="10" fill="#FFFFFF" opacity="0.65"/>
+    <circle cx="704" cy="336" r="9" fill="#FFFFFF" opacity="0.60"/>
+    <path d="M592 450C630 465 674 436 704 336" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round" stroke-dasharray="2 16" opacity="0.45"/>
+
+    <!-- Subtle outline -->
+    <path d="M238 248C238 218.177 262.177 194 292 194H650C673.748 194 693 213.252 693 237V611L737 653C737 671.225 722.225 686 704 686H292C262.177 686 238 665.823 238 636V248Z" stroke="#2A075F" stroke-width="16" stroke-linejoin="round" opacity="0.48"/>
+    <circle cx="636" cy="386" r="155" stroke="#2A075F" stroke-width="14" opacity="0.42"/>
+  </g>
+</svg>
