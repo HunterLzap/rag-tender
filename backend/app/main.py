@@ -17,7 +17,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import API_PREFIX, APP_NAME, APP_VERSION
+from app.config import API_PREFIX, APP_NAME, APP_VERSION, CORS_ORIGINS
 from app.database import init_db
 
 
@@ -40,10 +40,7 @@ def create_app() -> FastAPI:
     # CORS 配置：允许前端开发端口访问
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-        ],
+        allow_origins=CORS_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

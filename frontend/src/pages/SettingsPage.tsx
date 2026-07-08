@@ -3,10 +3,6 @@ import {
   Box,
   Typography,
   Button,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
   Grid,
   Chip,
   IconButton,
@@ -14,8 +10,6 @@ import {
   CircularProgress,
 } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
-import InfoIcon from '@mui/icons-material/Info';
-import FolderIcon from '@mui/icons-material/Folder';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import EditIcon from '@mui/icons-material/Edit';
@@ -52,14 +46,11 @@ const TYPE_ORDER: string[] = ['llm', 'embedding', 'vision'];
  * - API 配置区：卡片列表，每张卡片显示一个配置组（名称+来源+3个模型+Key+URL）
  * - 点击编辑打开统一表单弹窗
  * - 支持多配置组（未来可扩展）
- * - 数据目录、关于、缓存管理等辅助功能
  */
 const SettingsPage: React.FC = () => {
   const [configOpen, setConfigOpen] = useState(false);
   const [editConfig, setEditConfig] = useState<ApiConfig | null>(null);
   const [configs, setConfigs] = useState<ApiConfig[]>([]);
-  const [cacheDialogOpen, setCacheDialogOpen] = useState(false);
-  const [cacheCleared, setCacheCleared] = useState(false);
   const [testingGroup, setTestingGroup] = useState<string | null>(null);
   const [groupTestResults, setGroupTestResults] = useState<Record<string, { success: boolean; message: string } | null>>({});
 
@@ -196,17 +187,6 @@ const SettingsPage: React.FC = () => {
     setTestingGroup(null);
   }, []);
 
-  /** 清除缓存 */
-  const handleClearCache = useCallback(() => {
-    try {
-      localStorage.clear();
-      setCacheCleared(true);
-      setCacheDialogOpen(false);
-    } catch {
-      // ignore
-    }
-  }, []);
-
   return (
     <Box>
       <Grid container spacing={3}>
@@ -298,41 +278,6 @@ const SettingsPage: React.FC = () => {
           </Box>
         </Grid>
 
-        {/* Info bar — compact single row */}
-        <Grid item xs={12}>
-          <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-            <Box sx={{ flex: 1, minWidth: 200, p: 2, border: '1px solid #EDE7F6', borderRadius: 0 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                <FolderIcon sx={{ color: '#7C4DFF', fontSize: 20 }} />
-                <Typography variant="body2" sx={{ fontWeight: 600, color: '#333' }}>数据目录</Typography>
-              </Box>
-              <Typography variant="caption" sx={{ fontFamily: 'monospace', color: '#7C4DFF', wordBreak: 'break-all' }}>
-                D:\projects\RAG-Tender Assistant\data\
-              </Typography>
-            </Box>
-            <Box sx={{ flex: 1, minWidth: 200, p: 2, border: '1px solid #EDE7F6', borderRadius: 0 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                <InfoIcon sx={{ color: '#7C4DFF', fontSize: 20 }} />
-                <Typography variant="body2" sx={{ fontWeight: 600, color: '#333' }}>关于</Typography>
-              </Box>
-              <Typography variant="caption" sx={{ color: '#666' }}>RAG-Tender Assistant v1.0.0 · React 18 + FastAPI + SQLite</Typography>
-            </Box>
-            <Box sx={{ flex: 1, minWidth: 200, p: 2, border: '1px solid #EDE7F6', borderRadius: 0 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                <DeleteOutlineIcon sx={{ color: '#7C4DFF', fontSize: 20 }} />
-                <Typography variant="body2" sx={{ fontWeight: 600, color: '#333' }}>缓存管理</Typography>
-              </Box>
-              {cacheCleared ? (
-                <Typography variant="caption" sx={{ color: '#4CAF50' }}>缓存已清除</Typography>
-              ) : (
-                <Button size="small" variant="outlined" onClick={() => setCacheDialogOpen(true)}
-                  sx={{ borderColor: '#EF5350', color: '#EF5350', fontSize: 12, '&:hover': { borderColor: '#D32F2F', backgroundColor: '#FFEBEE' } }}>
-                  清除缓存
-                </Button>
-              )}
-            </Box>
-          </Box>
-        </Grid>
       </Grid>
 
       {/* API configuration dialog */}
@@ -342,35 +287,6 @@ const SettingsPage: React.FC = () => {
         editConfig={editConfig}
       />
 
-      {/* Clear cache confirmation dialog */}
-      <Dialog
-        open={cacheDialogOpen}
-        onClose={() => setCacheDialogOpen(false)}
-        maxWidth="xs"
-        fullWidth
-      >
-        <DialogTitle sx={{ color: '#333', fontWeight: 600 }}>确认清除缓存</DialogTitle>
-        <DialogContent>
-          <Typography variant="body1" sx={{ color: '#666' }}>
-            确定要清除浏览器本地缓存吗？此操作不会删除已上传的文件和数据。
-          </Typography>
-        </DialogContent>
-        <DialogActions sx={{ p: 2.5 }}>
-          <Button onClick={() => setCacheDialogOpen(false)} sx={{ color: '#666' }}>
-            取消
-          </Button>
-          <Button
-            variant="contained"
-            onClick={handleClearCache}
-            sx={{
-              backgroundColor: '#EF5350',
-              '&:hover': { backgroundColor: '#D32F2F' },
-            }}
-          >
-            确认清除
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 };

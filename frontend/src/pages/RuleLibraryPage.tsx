@@ -656,30 +656,34 @@ const RuleLibraryPage: React.FC = () => {
       {activeTab === 0 && (
       <TableContainer
         component={Paper}
-        sx={{ boxShadow: 'none', border: `1px solid ${colors.divider}` }}
+        sx={{
+          boxShadow: 'none',
+          border: `1px solid ${colors.divider}`,
+          overflowX: 'auto',
+        }}
       >
-        <Table size="small" sx={{ tableLayout: 'fixed' }}>
+        <Table size="small" sx={{ tableLayout: 'fixed', minWidth: 1120 }}>
           <TableHead>
             <TableRow>
-              <TableCell sx={{ width: '20%' }}>
+              <TableCell sx={{ width: 230 }}>
                 规则
               </TableCell>
-              <TableCell sx={{ width: '8%' }}>
+              <TableCell sx={{ width: 72 }}>
                 启用
               </TableCell>
-              <TableCell sx={{ width: '10%' }}>
+              <TableCell sx={{ width: 110 }}>
                 业务域
               </TableCell>
-              <TableCell sx={{ width: '9%' }}>
+              <TableCell sx={{ width: 92 }}>
                 严格度
               </TableCell>
-              <TableCell sx={{ width: '21%' }}>
+              <TableCell sx={{ width: 260 }}>
                 关键词
               </TableCell>
-              <TableCell sx={{ width: '20%' }}>
+              <TableCell sx={{ width: 250 }}>
                 规则说明
               </TableCell>
-              <TableCell sx={{ width: '12%' }}>
+              <TableCell sx={{ width: 106 }}>
                 命中动作
               </TableCell>
             </TableRow>
@@ -766,7 +770,25 @@ const RuleLibraryPage: React.FC = () => {
                       <MandatoryTag level={STRICTNESS_LABELS[rule.strictness]} />
                     </TableCell>
                     <TableCell>
-                      <OverflowChipRow items={rule.keywords} max={3} />
+                      <OverflowChipRow
+                        items={rule.keywords}
+                        max={3}
+                        renderChip={(keyword) => (
+                          <Chip
+                            label={keyword}
+                            size="small"
+                            variant="outlined"
+                            sx={{
+                              maxWidth: 96,
+                              '& .MuiChip-label': {
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              },
+                            }}
+                          />
+                        )}
+                      />
                     </TableCell>
                     <TableCell>
                       <ClampedText text={rule.description} lines={2} />

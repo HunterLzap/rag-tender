@@ -76,7 +76,20 @@ SUPPORTED_KNOWLEDGE_FORMATS: list[str] = [
 SUPPORTED_TEMPLATE_FORMATS: list[str] = [".docx", ".pdf", ".xlsx"]
 
 # LibreOffice 可执行文件路径
-LIBREOFFICE_PATH: str = r"C:\Program Files\LibreOffice\program\soffice.exe"
+LIBREOFFICE_PATH: str = os.getenv(
+    "LIBREOFFICE_PATH",
+    r"C:\Program Files\LibreOffice\program\soffice.exe",
+)
+
+# CORS 允许来源，逗号分隔。生产环境同源反代时通常不需要额外配置。
+CORS_ORIGINS: list[str] = [
+    origin.strip()
+    for origin in os.getenv(
+        "RAG_TENDER_CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
 
 # ---------------------------------------------------------------------------
 # 供应商预设
