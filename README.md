@@ -1,349 +1,185 @@
-<div align="center">
+# 投标响应工作台
 
-<img src="./docs/assets/logo.svg" alt="资质通 Logo" width="120" />
+面向投标文件审阅和投标模板填写的工作台。核心目标是让每条要求都能回到原文、每个结论都有证据、每个填写建议都能人工接受或修改。
 
-# 资质通 · RAG-Tender Assistant
+这不是通用文档问答，也不把向量相似度当作最终判断。系统把文档解析、要求提取、证据匹配、规则判定、人工复核和模板标注组织成一条可追踪的业务链路。
 
-**面向招投标场景的本地化 RAG 标书解析与资质匹配助手**
+## 核心链路
 
-我开源了一个面向招投标场景的本地化 RAG 工作流样例：可以解析标书要求、匹配企业资质证据、标记待确认项，并提醒投标红线风险。
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white)](#快速开始)
-[![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](#快速开始)
-[![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)](#技术栈)
-[![React](https://img.shields.io/badge/Frontend-React%2018-61DAFB?logo=react&logoColor=0b1220)](#技术栈)
-[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows11&logoColor=white)](#快速开始)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#引用与交流)
-
-[快速开始](#快速开始) · [核心功能](#核心功能) · [架构概览](#架构概览) · [使用流程](#使用流程) · [路线图](#路线图) · [许可证](#许可证)
-
-</div>
-
-<br/>
-
-> 本仓库为脱敏开源版本，**不包含**真实标书、真实资质文件、上传文件、数据库、日志、API Key 或运行期 RAG 工作目录。
-
-## 📑 目录
-
-- [项目背景](#项目背景)
-- [界面预览](#界面预览)
-- [核心功能](#核心功能)
-- [适合参考的方向](#适合参考的方向)
-- [架构概览](#架构概览)
-- [技术栈](#技术栈)
-- [快速开始](#快速开始)
-- [使用流程](#使用流程)
-- [脱敏与安全说明](#脱敏与安全说明)
-- [测试](#测试)
-- [项目目录](#项目目录)
-- [路线图](#路线图)
-- [引用与交流](#引用与交流)
-- [许可证](#许可证)
-
-## 项目背景
-
-招投标文件通常篇幅长、格式复杂、要求分散，人工核对容易遇到几个问题：
-
-- 📄 标书要求分散在不同章节，容易漏看关键条款。
-- 🔁 企业资质、人员证明、业绩、财务材料之间需要反复比对。
-- 🔍 "符合 / 不符合 / 待确认"需要可追溯的证据链，而不是只给一个相似度。
-- 🚩 投标保证金、签章、授权书、有效期、报价上限等红线事项需要单独提醒。
-- 🗃️ 错例和人工修正如果不能沉淀，系统很难持续改进。
-
-> 资质通的目标不是替代人工决策，而是把**重复阅读、初步归类、证据召回、风险提醒和报告整理**自动化，让人工把精力放在最终判断和风险确认上。
-
-## 界面预览
-
-<div align="center">
-  <img src="./docs/assets/screenshot.svg" alt="资质通仪表盘界面截图" width="820" />
-  <p><sub>资质通本地运行界面：仪表盘、标书解析、资质库、匹配结果、错例库与规则库入口。</sub></p>
-</div>
-
-## 核心功能
-
-| 模块 | 说明 |
-| --- | --- |
-| 📥 **标书上传与解析** | 支持 PDF / DOCX 等文件，解析后生成结构化要求 |
-| ✅ **要求核对** | 按资质、业绩、财务、人员、提交件等类别核对和修正 |
-| 🗂️ **资质库管理** | 维护企业资质、人员资质、财务资料、业绩项目等证据 |
-| 🔎 **资质匹配** | 对标书要求和资质库证据进行候选召回与字段级证据判断 |
-| 🛡️ **保守判定** | 缺少关键证据时默认进入"待确认"，避免仅凭相似度误判 |
-| 📚 **错例库** | 沉淀人工确认结果，用于复盘误判和补充规则 |
-| 📏 **规则库** | 查看内置规则、自定义规则、规则草案、变更记录和候选建议 |
-| 🚩 **红线待办** | 识别授权书、投标有效期、报价上限、暗标敏感信息、电子投标提交等重点事项 |
-| 📊 **检查报告** | 导出资质匹配总览、不通过项、待确认项、缺失证据、红线待办和检查器结果 |
-| 💻 **本地部署** | 前端 React，后端 FastAPI，数据存储使用本地 SQLite |
-
-## 适合参考的方向
-
-这个项目更偏"业务型 RAG 系统样例"，适合参考：
-
-- RAG 如何进入真实业务流程，而不是停留在聊天问答。
-- 长文档解析后如何形成结构化业务对象。
-- 如何把相似度召回、规则检查、人工确认组合起来。
-- 如何为 AI 结果保留证据链和人工纠错入口。
-- 如何设计本地化部署的 AI 工具，包括 API Key 加密、本地数据库和前后端分离。
-
-如果你正在做政企文档、招投标、合同审查、资质审核、知识库问答或行业资料核对，本项目中的架构和取舍可能会有参考价值，不是一个聊天机器人，而是一个把 RAG 接进真实业务流程的招投标资质核查样例。
-
-## 架构概览
-
-```mermaid
-flowchart TD
-    A["React + MUI 前端"] -->|REST API| B["FastAPI 后端"]
-    B --> C[("SQLite")]
-    B --> D["本地文件系统"]
-    B --> E["RAG 工作目录"]
-    C --> F["标书要求 / 资质证据 / 匹配结果 / 错例 / 规则 / 检查报告"]
-    D --> F
-    E --> F
+```text
+Project
+  -> DocumentRevision / Page / Block / TableCell
+  -> SourceSpan
+  -> Requirement
+  -> EvidenceItem / EvidenceFact
+  -> Decision
+  -> FillSlot / FillTarget / FillSuggestion
+  -> AnnotationAsset
+  -> ChecklistItem / Report
 ```
 
-主要模块：
+## 当前能力
 
-- `frontend/`：React + Vite + TypeScript + MUI 前端。
-- `backend/`：FastAPI 后端、SQLite 初始化、业务服务和 API 路由。
-- `docs/assets/`：README 展示资源。
-- `samples/`：脱敏样例，禁止放真实业务资料。
+- PDF 文本、坐标和表格解析，扫描页走视觉模型转写；不可识别时保留明确质量标记。
+- DOCX、XLSX、CSV 基础解析。DOC 仅在安装了 LibreOffice 时转换。
+- 页面级要求提取，模型必须返回 `block_id + quote`，服务端回查原文后才入库。
+- 证据事实、确定性规则、模型语义评估和人工复核分层判定。
+- 硬性要求缺少证据时默认进入 `needs_review`，不会自动放行。
+- 投标截止日参与证书和日期规则判断。
+- 投标模板填写位置识别，支持表格单元格、下划线字段和合成空行。
+- 基于模板原页面渲染的标注 PNG，红框和编号直接叠加在原图上。
+- 填写建议接受、修改、拒绝和审阅人记录。
+- 自动生成交付检查项，处理后更新分析状态。
+- 后台任务持久化、租约、重试、取消和 worker 崩溃恢复。
+- SQLite WAL、Alembic 迁移和 API Key 本地加密。
+
+## 不包含
+
+- RAG-Anything、LightRAG、MinerU、PaddleOCR、Torch。
+- 向量数据库主链路。
+- 自动修改真实 DOCX/XLSX 并回写文件。当前 P0 是填写建议和原页面标注图，回写属于下一阶段。
+- 用图像生成模型生成标书页面。标注图始终来自原页面渲染。
 
 ## 技术栈
 
 | 层级 | 技术 |
 | --- | --- |
-| 🎨 前端 | React 18, Vite, TypeScript, MUI, React Router |
-| ⚙️ 后端 | Python, FastAPI, Uvicorn, Pydantic |
-| 🗄️ 数据 | SQLite, aiosqlite |
-| 📄 文档处理 | RAG-Anything, MinerU, OCR, LibreOffice |
-| 📎 文件处理 | python-docx, openpyxl, pdfplumber |
-| 🚢 部署方式 | Windows 本地部署 |
+| 前端 | React 18、Vite、TypeScript、MUI、TanStack Query |
+| API | FastAPI、Pydantic 2、SQLAlchemy 2 async |
+| 数据 | SQLite WAL、Alembic |
+| 文档 | pdfplumber、pypdfium2、python-docx、openpyxl、Pillow |
+| 后台任务 | 自建 jobs 表 + 独立 worker |
+| 模型 | OpenAI-compatible Chat Completions，文本和视觉模型分开配置 |
 
-## 快速开始
+## 本地启动
 
-### 0. 获取代码
+要求：
 
-```powershell
-git clone https://github.com/HunterLzap/rag-tender.git
-cd rag-tender
-```
-
-### 1. 准备环境
-
-建议环境：
-
-- Windows 10 / 11
 - Python 3.13+
-- Node.js 22+
-- LibreOffice，并加入系统 `PATH`
+- Node.js 22+、pnpm
+- 可选：LibreOffice（只有 `.doc` 转换需要）
 
-### 2. 安装后端依赖
+安装后端：
 
-```powershell
+```bash
 cd backend
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
+uv sync
+cp ../.env.example ../.env
 ```
 
-### 3. 安装前端依赖
+安装前端：
 
-```powershell
+```bash
 cd frontend
-npm install
+pnpm install
 ```
 
-### 4. 配置 API Key 加密主密钥
+启动全部服务：
 
-本项目不会把 API Key 写入配置文件。API Key 通过前端设置页保存，并使用 `RAG_TENDER_SECRET_KEY` 加密后写入本地 SQLite。
-
-生成密钥：
-
-```powershell
-backend\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-将输出结果配置为 Windows 用户或系统环境变量：
-
-```text
-RAG_TENDER_SECRET_KEY=你的生成结果
-```
-
-`.env.example` 仅提供占位示例，不包含真实密钥。
-
-### 5. 启动项目
-
-方式一：双击或执行：
-
-```powershell
-start.bat
-```
-
-方式二：手动启动：
-
-```powershell
-# 终端 1：后端
-cd backend
-.\.venv\Scripts\activate
-python run.py
-
-# 终端 2：前端
-cd frontend
-npm run dev
+```bash
+./start.sh
 ```
 
 访问：
 
-- 前端：http://localhost:5173
+- 前端：http://127.0.0.1:5173
 - API 文档：http://127.0.0.1:8000/docs
 
-停止服务：
+停止：
 
-```powershell
-.\_stop_services.bat
+```bash
+./stop.sh
 ```
+
+开发时也可以分别运行：
+
+```bash
+cd backend && .venv/bin/uvicorn app.main:app --reload
+cd backend && .venv/bin/python -m app.worker
+cd frontend && pnpm dev
+```
+
+启动脚本会先执行 `alembic upgrade head`。已有 v2 开发库如果没有迁移版本，先在确认不需要迁移数据时重建开发库，或为它创建 baseline；不要把旧 RAG 数据库当作 v2 数据库直接使用。
+
+## Docker
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+默认前端端口为 `8088`，可用 `TENDER_HTTP_PORT` 修改。数据目录挂载在 `./data`。
+
+## 模型配置
+
+在前端「模型配置」页面填写：
+
+- `base_url`：兼容 OpenAI Chat Completions 的地址，例如 `https://api.openai.com/v1`
+- `text_model`：要求提取和语义评估模型
+- `vision_model`：扫描页视觉转写模型，可选
+- `api_key`：只保存 Fernet 加密结果
+
+API Key 的主密钥来自 `TENDER_SECRET_KEY`。未配置时会在数据目录生成 `.secret_key`，该文件权限为 `0600`，不得提交。
+
+可使用 `POST /api/v2/model-configs/test` 或页面的测试入口验证文本模型连接。
 
 ## 使用流程
 
-1. 打开"设置"，填写 LLM、Embedding、Vision 模型配置。
-2. 上传标书，等待解析完成。
-3. 在核对页检查并修正结构化要求。
-4. 上传企业资质、人员资料、财务资料和业绩文件。
-5. 进入"匹配结果"，触发或查看资质匹配。
-6. 对待确认项进行人工判断，必要时写入错例库。
-7. 在"规则库"查看或维护规则。
-8. 导出检查报告，辅助投标前复核。
+1. 新建项目，上传招标文件和投标模板。
+2. 设置投标截止日，并录入投标人、报价、工期等响应值。
+3. 等待解析完成，启动分析。
+4. 在「要求核对」中检查原文、证据和判定，提交人工复核。
+5. 在「填写建议」中查看原模板标注图，接受或修改建议。
+6. 在「交付检查」中逐项完成待办。
+7. 导出 Markdown 检查报告。
 
-## 脱敏与安全说明
+## 验证
 
-> ⚠️ **提交前请务必确认**：以下内容不会被上传到公开仓库。
-
-本开源仓库应保留：
-
-- 源码
-- 测试
-- 文档
-- 配置模板
-- 脱敏样例
-- 启动脚本
-- 图标资源
-
-本开源仓库**不应**包含：
-
-- `.env` 或任何真实 API Key
-- `data/`、`output/`、`backend/output/`
-- SQLite 数据库，如 `*.db`、`*.sqlite`
-- 上传文件、真实标书、真实资质、真实企业资料
-- 日志、缓存、`__pycache__`
-- `frontend/node_modules/`
-- `frontend/dist/`
-- RAG 工作目录，如 `rag_workspace/`
-
-<details>
-<summary>📋 提交前自检脚本（点击展开）</summary>
-
-```powershell
-Get-ChildItem -Recurse -Force -ErrorAction SilentlyContinue |
-Where-Object {
-  $_.Name -ne ".env.example" -and
-  $_.Name -match '^\.env($|\.)|\.db$|\.sqlite$|\.sqlite3$|\.log$|node_modules|dist|__pycache__|rag_workspace'
-} |
-Select-Object FullName
-```
-
-没有输出时再提交。
-
-</details>
-
-## 测试
-
-后端关键测试：
-
-```powershell
+```bash
 cd backend
-.\.venv\Scripts\python.exe -m unittest discover -s . -p "test_*.py"
+uv run ruff check app tests alembic
+uv run pytest -q
+
+cd ../frontend
+pnpm test
+pnpm build
 ```
 
-前端构建：
+端到端测试覆盖：上传 PDF、worker 解析、mock 模型提取、判定、人工复核、填写计划、建议修改和标注图读取。
 
-```powershell
-cd frontend
-npm run build
+黄金集评测：
+
+```bash
+cd backend
+uv run python -m app.evaluation_cli --help
 ```
 
-> 说明：前端构建后会生成 `frontend/dist/` 和 `*.tsbuildinfo`，这些属于构建产物，不应提交到仓库。
+## 数据与安全
 
-## 项目目录
+- `data/`、上传文件、渲染页、导出图、SQLite 和日志都不提交。
+- 模型输入中的文档内容按不可信数据处理，提示词要求忽略文档内的指令。
+- 不把模型输出坐标直接当作页面坐标；标注坐标来自解析后的原文块或表格单元格。
+- `needs_review` 是保守结果，不应被 UI 当作通过。
+
+## 目录
 
 ```text
-RAG-Tender-Assistant-open-source/
-├── backend/                  # FastAPI 后端
-│   ├── app/
-│   │   ├── api/              # API 路由
-│   │   ├── models/           # 数据模型
-│   │   ├── schemas/          # 响应结构
-│   │   ├── services/         # 核心业务逻辑
-│   │   └── utils/            # 工具函数
-│   ├── requirements.txt
-│   └── test_*.py
-├── frontend/                 # React 前端
-│   ├── src/
-│   │   ├── api/
-│   │   ├── components/
-│   │   ├── pages/
-│   │   └── types/
-│   └── package.json
-├── docs/assets/              # README 展示资源
-├── samples/                  # 脱敏样例
-├── start.bat                 # Windows 启动脚本
-├── _stop_services.bat        # 停止服务脚本
-├── .env.example              # 环境变量示例
-└── README.md
+backend/
+  app/
+    api/           REST API
+    domain/        文档 IR 和确定性规则
+    services/      解析、提取、判定、填写、任务
+    models.py      SQLAlchemy 领域模型
+  alembic/         数据库迁移
+  tests/           后端和端到端测试
+frontend/
+  src/
+    components/    页面查看器
+    pages/         项目、工作台、证据、设置
+tests/evaluation/  黄金集样例
+samples/           脱敏样例
 ```
-
-## 路线图
-
-路线图不是承诺，而是帮助读者理解项目状态和可能的后续方向。
-
-**✅ 已完成**
-
-- [x] 标书上传、解析和要求核对
-- [x] 资质库、业绩库、财务资料和人员资料管理
-- [x] 资质匹配、保守判定、证据矩阵和待确认机制
-- [x] 错例库、规则库和规则变更记录
-- [x] 投标红线待办和检查报告导出
-- [x] API Key 加密存储和调用日志脱敏
-- [x] 本地化前后端启动脚本
-
-**🧭 后续可探索**
-
-- [ ] 更稳定的跨平台部署方式，例如 Docker
-- [ ] 更完整的前端自动化测试
-- [ ] 更细的规则版本管理和规则效果评估
-- [ ] 更强的脱敏样例和演示数据集
-- [ ] 面向更多行业文档的规则迁移
-
-## 引用与交流
-
-⭐ 如果这个项目对你的学习、研究、课程、文章或业务原型有帮助，欢迎点个 Star 并引用本仓库链接。
-
-也欢迎通过 Issue 讨论：
-
-- RAG 在业务流程中的落地方式
-- 招投标场景的文档解析与证据匹配
-- 规则引擎与人工纠错如何结合
-- 本地化 AI 工具的安全和部署问题
-
-欢迎提交 Issue 或 PR 参与共建。
-
-[![Star History Chart](https://api.star-history.com/svg?repos=HunterLzap/rag-tender&type=Date)](https://star-history.com/#HunterLzap/rag-tender&Date)
 
 ## 许可证
 
-本项目使用 MIT License。详见 [LICENSE](./LICENSE)。
-
-本项目参考并基于 [HKUDS/RAG-Anything](https://github.com/HKUDS/RAG-Anything) 相关能力进行业务化集成，感谢开源社区的基础工作。
-
-<div align="center">
-<sub>用 ❤️ 打磨于真实招投标场景 · 欢迎 Star ⭐ 与 Issue 交流</sub>
-</div>
-
+MIT，见 `LICENSE`。

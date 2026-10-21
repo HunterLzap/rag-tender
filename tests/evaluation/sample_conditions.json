@@ -1,0 +1,20 @@
+{
+  "document": "samples/控制柜配电柜变频柜采购招标公告_样本.pdf",
+  "requirements": [
+    {
+      "title": "注册资本",
+      "statement": "注册资本不少于人民币 1000 万元",
+      "expected_status": "needs_review"
+    },
+    {
+      "title": "ISO9001",
+      "statement": "具有有效的 ISO9001 质量管理体系认证证书",
+      "expected_status": "needs_review"
+    },
+    {
+      "title": "类似项目业绩",
+      "statement": "近三年须具有至少 3 个单项合同金额不低于 200 万元的同类业绩",
+      "expected_status": "needs_review"
+    }
+  ]
+}
