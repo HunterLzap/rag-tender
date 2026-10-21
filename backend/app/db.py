@@ -77,3 +77,19 @@ async def create_schema() -> None:
 
     async with get_engine().begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        if connection.dialect.name == "sqlite":
+            from sqlalchemy import text
+
+            await connection.execute(
+                text(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS search_chunks_fts "
+                    "USING fts5(chunk_id UNINDEXED, tokens, tokenize='unicode61')"
+                )
+            )
+            await connection.execute(
+                text(
+                    "CREATE TRIGGER IF NOT EXISTS search_chunks_delete "
+                    "AFTER DELETE ON search_chunks BEGIN "
+                    "DELETE FROM search_chunks_fts WHERE chunk_id=old.id; END"
+                )
+            )

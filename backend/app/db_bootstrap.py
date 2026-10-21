@@ -18,16 +18,14 @@ from app.config import get_settings
 
 V2_TABLES = {"projects", "documents", "analysis_runs", "fill_suggestions"}
 BASELINE_REVISION = "fcb21467dc21"
-KNOWN_REVISIONS = {BASELINE_REVISION, "a19b2f0e71d4"}
+KNOWN_REVISIONS = {BASELINE_REVISION, "a19b2f0e71d4", "c82a7e4d190f"}
 
 
 async def _table_names() -> set[str]:
     engine = create_async_engine(get_settings().resolved_database_url)
     try:
         async with engine.connect() as connection:
-            return set(
-                await connection.run_sync(lambda sync: inspect(sync).get_table_names())
-            )
+            return set(await connection.run_sync(lambda sync: inspect(sync).get_table_names()))
     finally:
         await engine.dispose()
 
@@ -53,13 +51,14 @@ def bootstrap() -> None:
     if settings.resolved_database_url.startswith("sqlite") and V2_TABLES.issubset(tables):
         path = settings.resolved_database_url.split("///", 1)[-1].split("?", 1)[0]
         with sqlite3.connect(path, timeout=30) as connection:
-            current = connection.execute(
-                "SELECT version_num FROM alembic_version"
-            ).fetchone() if _has_alembic_version(settings.resolved_database_url) else None
+            current = (
+                connection.execute("SELECT version_num FROM alembic_version").fetchone()
+                if _has_alembic_version(settings.resolved_database_url)
+                else None
+            )
             if current is None:
                 connection.execute(
-                    "CREATE TABLE IF NOT EXISTS alembic_version "
-                    "(version_num VARCHAR(32) NOT NULL)"
+                    "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"
                 )
                 connection.execute(
                     "INSERT OR REPLACE INTO alembic_version (version_num) VALUES (?)",

@@ -23,6 +23,8 @@ class ORMModel(BaseModel):
 
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=300)
+    organization_id: str | None = None
+    auto_analyze: bool = True
     bidder_name: str | None = None
     purchaser: str | None = None
     tender_no: str | None = None
@@ -33,6 +35,8 @@ class ProjectCreate(BaseModel):
 
 class ProjectUpdate(BaseModel):
     name: str | None = None
+    organization_id: str | None = None
+    auto_analyze: bool | None = None
     bidder_name: str | None = None
     purchaser: str | None = None
     tender_no: str | None = None
@@ -45,6 +49,8 @@ class ProjectUpdate(BaseModel):
 class ProjectRead(ORMModel):
     id: str
     name: str
+    organization_id: str | None = None
+    auto_analyze: bool = True
     bidder_name: str | None
     purchaser: str | None
     tender_no: str | None
@@ -88,7 +94,8 @@ class BidRead(ORMModel):
 
 class DocumentRead(ORMModel):
     id: str
-    project_id: str
+    project_id: str | None
+    organization_id: str | None = None
     role: str
     filename: str
     content_type: str | None
@@ -99,6 +106,9 @@ class DocumentRead(ORMModel):
     current_page_count: int = 0
     parse_status: str = "pending"
     parse_error: str | None = None
+    ai_status: str = "pending"
+    ai_error: str | None = None
+    evidence_count: int = 0
     supersedes_id: str | None
     created_at: datetime
 
@@ -229,7 +239,15 @@ class ReviewRecordRead(ORMModel):
 
 
 class EvidenceCreate(BaseModel):
-    kind: Literal["qualification", "personnel", "performance", "financial"]
+    kind: Literal[
+        "qualification",
+        "personnel",
+        "performance",
+        "financial",
+        "technical",
+        "commercial",
+        "other",
+    ]
     title: str = Field(min_length=1)
     holder: str | None = None
     issuer: str | None = None
@@ -265,7 +283,8 @@ class EvidenceUpdate(BaseModel):
 
 class EvidenceRead(ORMModel):
     id: str
-    project_id: str
+    project_id: str | None
+    organization_id: str | None = None
     kind: str
     title: str
     holder: str | None
@@ -333,6 +352,7 @@ class FillSuggestionRead(ORMModel):
     confidence: float | None
     status: str
     evidence_ids: list[str]
+    source_refs: list[dict[str, Any]] = Field(default_factory=list)
     reviewed_by: str | None
     reviewed_at: datetime | None
     review_note: str | None
@@ -340,9 +360,7 @@ class FillSuggestionRead(ORMModel):
 
 class FillSuggestionUpdate(BaseModel):
     value: str | None = None
-    status: Literal[
-        "proposed", "accepted", "edited", "missing_evidence", "rejected"
-    ] | None = None
+    status: Literal["proposed", "accepted", "edited", "missing_evidence", "rejected"] | None = None
     review_note: str | None = None
     reviewed_by: str | None = None
 
@@ -394,9 +412,7 @@ class FillSuggestionCreate(BaseModel):
     value: str | None = None
     rationale: str = Field(min_length=1)
     confidence: float | None = Field(default=None, ge=0, le=1)
-    status: Literal[
-        "proposed", "accepted", "edited", "missing_evidence", "rejected"
-    ] = "proposed"
+    status: Literal["proposed", "accepted", "edited", "missing_evidence", "rejected"] = "proposed"
     evidence_ids: list[str] = Field(default_factory=list)
 
 
@@ -453,6 +469,15 @@ class EvidenceFactRead(ORMModel):
     source_span_id: str | None
     extraction_method: str
     review_status: str
+    source_span: SourceSpanRead | None = None
+
+
+class EvidenceFactUpdate(BaseModel):
+    value_text: str | None = None
+    value_number: Decimal | None = None
+    value_date: date | None = None
+    unit: str | None = None
+    review_status: Literal["unreviewed", "verified", "rejected"] | None = None
 
 
 class ResponseValueCreate(BaseModel):
@@ -531,6 +556,10 @@ class ModelConfigCreate(BaseModel):
     api_key: str = Field(min_length=1, repr=False)
     text_model: str
     vision_model: str | None = None
+    embedding_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = Field(default=None, repr=False)
+    embedding_dimensions: int | None = Field(default=None, ge=1)
     is_active: bool = True
     config_json: dict[str, Any] = Field(default_factory=dict)
 
@@ -543,6 +572,10 @@ class ModelConfigRead(ORMModel):
     api_key_masked: str
     text_model: str
     vision_model: str | None
+    embedding_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_api_key_masked: str = "沿用主模型密钥"
+    embedding_dimensions: int | None = None
     is_active: bool
     config_json: dict[str, Any]
     created_at: datetime
@@ -555,6 +588,10 @@ class ModelConfigUpdate(BaseModel):
     api_key: str | None = Field(default=None, min_length=1, repr=False)
     text_model: str | None = Field(default=None, min_length=1)
     vision_model: str | None = None
+    embedding_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = Field(default=None, min_length=1, repr=False)
+    embedding_dimensions: int | None = Field(default=None, ge=1)
     is_active: bool | None = None
 
 
@@ -570,6 +607,27 @@ class ModelTestResult(BaseModel):
     success: bool
     latency_ms: int
     message: str
+
+
+class OrganizationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=300)
+    unified_code: str | None = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class OrganizationUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=300)
+    unified_code: str | None = None
+    metadata_json: dict[str, Any] | None = None
+
+
+class OrganizationRead(ORMModel):
+    id: str
+    name: str
+    unified_code: str | None
+    metadata_json: dict[str, Any]
+    document_count: int = 0
+    evidence_count: int = 0
 
 
 class ReportRead(BaseModel):

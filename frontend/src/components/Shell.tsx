@@ -8,6 +8,7 @@ import ArticleOutlined from '@mui/icons-material/ArticleOutlined';
 import DashboardOutlined from '@mui/icons-material/DashboardOutlined';
 import SettingsOutlined from '@mui/icons-material/SettingsOutlined';
 import FolderOutlined from '@mui/icons-material/FolderOutlined';
+import BusinessOutlined from '@mui/icons-material/BusinessOutlined';
 import HelpOutlineRounded from '@mui/icons-material/HelpOutlineRounded';
 import MenuRounded from '@mui/icons-material/MenuRounded';
 import CloseRounded from '@mui/icons-material/CloseRounded';
@@ -50,15 +51,16 @@ export default function Shell() {
   });
   const tab = new URLSearchParams(location.search).get('tab') ?? 'requirements';
   const sectionTitle = location.pathname === '/' ? '全部项目'
-    : location.pathname === '/settings' ? '模型设置'
+    : location.pathname === '/library' ? '企业资料库'
+      : location.pathname === '/settings' ? '模型设置'
       : location.pathname.endsWith('/evidence') ? '证据资料'
         : runId ? ({ requirements: '要求核对', fill: '填写建议', checklist: '检查导出' }[tab] ?? '要求核对')
-          : location.hash === '#history' ? '分析记录' : '资料准备';
+          : location.hash === '#history' ? '分析记录' : location.hash === '#library' ? '企业材料' : '资料准备';
   const submenus = [
     { label: '资料准备', to: `/projects/${projectId}`, selected: Boolean(routeProjectId && !location.pathname.endsWith('/evidence') && location.hash !== '#history') },
-    { label: '要求核对', to: `/runs/${latestRunId}?tab=requirements`, selected: Boolean(runId && tab === 'requirements'), disabled: !latestRunId },
-    { label: '填写建议', to: `/runs/${latestRunId}?tab=fill`, selected: Boolean(runId && tab === 'fill'), disabled: !latestRunId },
-    { label: '检查导出', to: `/runs/${latestRunId}?tab=checklist`, selected: Boolean(runId && tab === 'checklist'), disabled: !latestRunId },
+    { label: '要求核对', to: latestRunId ? `/runs/${latestRunId}?tab=requirements` : `/projects/${projectId}`, selected: Boolean(runId && tab === 'requirements'), disabled: !latestRunId },
+    { label: '填写建议', to: latestRunId ? `/runs/${latestRunId}?tab=fill` : `/projects/${projectId}`, selected: Boolean(runId && tab === 'fill'), disabled: !latestRunId },
+    { label: '检查导出', to: latestRunId ? `/runs/${latestRunId}?tab=checklist` : `/projects/${projectId}`, selected: Boolean(runId && tab === 'checklist'), disabled: !latestRunId },
     { label: '证据资料', to: `/projects/${projectId}/evidence`, selected: location.pathname.endsWith('/evidence') },
     { label: '分析记录', to: `/projects/${projectId}#history`, selected: location.hash === '#history' },
   ];
@@ -72,6 +74,9 @@ export default function Shell() {
         <List sx={{ pt: 1 }}>
           <ListItemButton component={Link} to="/" selected={location.pathname === '/'} onClick={() => setMobileOpen(false)} sx={navStyle}>
             <ListItemIcon sx={{ minWidth: 34, color: 'inherit' }}><DashboardOutlined fontSize="small" /></ListItemIcon><ListItemText primary="全部项目" />
+          </ListItemButton>
+          <ListItemButton component={Link} to="/library" selected={location.pathname === '/library'} onClick={() => setMobileOpen(false)} sx={navStyle}>
+            <ListItemIcon sx={{ minWidth: 34, color: 'inherit' }}><BusinessOutlined fontSize="small" /></ListItemIcon><ListItemText primary="企业资料库" />
           </ListItemButton>
           {projectId && <>
             <ListItemButton onClick={() => setProjectOpen(!projectOpen)} aria-expanded={projectOpen} sx={{ ...navStyle, mt: 1 }}>
@@ -114,11 +119,11 @@ export default function Shell() {
           <Toolbar sx={{ minHeight: '52px !important', gap: 1, px: { xs: 2, lg: 3 } }}>
             <IconButton aria-label="打开导航菜单" onClick={() => setMobileOpen(true)} sx={{ display: { md: 'none' }, mr: 1 }}><MenuRounded /></IconButton>
             <Breadcrumbs aria-label="面包屑导航" separator={<NavigateNextRounded sx={{ fontSize: 15 }} />} sx={{ flex: 1, minWidth: 0, '& ol': { flexWrap: 'nowrap' } }}>
-              <MuiLink component={Link} to="/" underline="hover" color="text.secondary" fontSize={13}>项目</MuiLink>
+              <MuiLink component={Link} to="/" underline="hover" color="text.secondary" fontSize={13}>{projectId || location.pathname === '/' ? '项目' : '工作台'}</MuiLink>
               {projectId && <MuiLink component={Link} to={`/projects/${projectId}`} underline="hover" color="text.secondary" sx={{ display: 'block', maxWidth: { xs: 95, sm: 250 }, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>{project.data?.name ?? '当前项目'}</MuiLink>}
               <Typography color="text.primary" fontSize={13} aria-current="page">{sectionTitle}</Typography>
             </Breadcrumbs>
-            {runtime.data && <Chip label={runtime.data.live_model_calls ? '模型调用已启用' : '离线模式'} variant="outlined" sx={{ display: { xs: 'none', sm: 'inline-flex' }, bgcolor: '#F9FAFB', borderColor: 'divider', color: 'text.secondary', mr: 1 }} />}
+            {runtime.data && <Chip label={runtime.data.live_model_calls ? 'AI 已启用' : '开发 · AI 暂停'} variant="outlined" sx={{ display: { xs: 'none', sm: 'inline-flex' }, bgcolor: '#F9FAFB', borderColor: 'divider', color: 'text.secondary', mr: 1 }} />}
             <IconButton aria-label="打开操作指南" onClick={() => setHelpOpen(true)}><HelpOutlineRounded fontSize="small" /></IconButton>
           </Toolbar>
         </AppBar>
@@ -131,17 +136,17 @@ export default function Shell() {
           <Stack direction="row" alignItems="center" justifyContent="space-between"><Typography variant="h5">操作指南</Typography><IconButton onClick={() => setHelpOpen(false)} aria-label="关闭操作指南"><CloseRounded /></IconButton></Stack>
           <Typography color="text.secondary">按以下四步准备投标响应。每次返回项目，都可以从当前进度继续。</Typography>
           {[
-            ['1', '准备资料', '新建项目，上传招标文件及投标模板；补充投标人、截止时间和准备填写的内容。证明材料在「证据资料」中登记。'],
-            ['2', '核对要求', '可创建人工工作台，或在模型启用后开始分析。逐条查看原文和证据；漏提要求可手工补充，并保存复核结论。'],
+            ['1', '企业材料入库', '在「企业资料库」建立企业，集中上传资质、人员、业绩、财务和产品材料。启用模型后自动提取事实和建立索引，跨项目复用。'],
+            ['2', '项目自动对标', '新建项目并选择企业，上传招标文件、补遗和投标模板。资料处理完成后自动对标企业材料，生成逐项结论及填写建议；在工作台复核来源和缺项。'],
             ['3', '确认填写', '选择模板，逐项确认内容。漏识别的位置可在原页手工框选，保存后同步更新标注图。'],
             ['4', '检查导出', '处理交付清单后下载资料包，包含检查报告、填写清单和标注图。标注图用于填写参考，原始文件不会自动改写。'],
           ].map(([number, title, text]) => <Stack key={number} direction="row" gap={1.5}><Chip label={number} color="primary" /><Box><Typography variant="subtitle2">{title}</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{text}</Typography></Box></Stack>)}
           <Divider />
           <Typography variant="subtitle2">上传时该选哪种文件？</Typography>
-          <Typography variant="body2" color="text.secondary">招标文件：采购方发布的要求。投标模板：需要你填写的空表或格式文件。证明材料：用于证明资质、人员、业绩和财务情况的文件。</Typography>
+          <Typography variant="body2" color="text.secondary">项目内上传招标文件、补遗、答疑和投标模板；企业证明材料统一在「企业资料库」上传。项目选择企业即可引用材料，无需重复上传。</Typography>
           <Typography variant="subtitle2">状态怎么理解？</Typography>
           <Stack direction="row" gap={1} flexWrap="wrap"><Chip color="success" label="绿色 · 已完成 / 已确认" /><Chip color="warning" label="黄色 · 待补充 / 待复核" /><Chip color="error" label="红色 · 不符合 / 未完成" /></Stack>
-          <Typography variant="body2" color="text.secondary">离线模式可以新建人工工作台、补充要求、校正扫描页文字、框选填写位置和导出资料；真实模型分析和连接测试保持关闭。</Typography>
+          <Typography variant="body2" color="text.secondary">开发阶段只解析和保存文件，AI 入库和分析暂停。客户启用模型后按自动流程运行；人工工作台保留在项目更多菜单中。</Typography>
           <Button variant="outlined" onClick={() => setHelpOpen(false)}>我知道了，继续操作</Button>
         </Stack>
       </Drawer>

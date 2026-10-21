@@ -92,6 +92,9 @@ class EvidenceKind(str, enum.Enum):
     PERSONNEL = "personnel"
     PERFORMANCE = "performance"
     FINANCIAL = "financial"
+    TECHNICAL = "technical"
+    COMMERCIAL = "commercial"
+    OTHER = "other"
 
 
 class EvidenceStatus(str, enum.Enum):
@@ -103,6 +106,7 @@ class EvidenceStatus(str, enum.Enum):
 
 class EvidenceReviewStatus(str, enum.Enum):
     UNREVIEWED = "unreviewed"
+    EXTRACTED = "extracted"
     VERIFIED = "verified"
     REJECTED = "rejected"
 
@@ -156,6 +160,8 @@ class Project(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(300))
+    organization_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"))
+    auto_analyze: Mapped[bool] = mapped_column(Boolean, default=True)
     bidder_name: Mapped[str | None] = mapped_column(String(300))
     purchaser: Mapped[str | None] = mapped_column(String(300))
     tender_no: Mapped[str | None] = mapped_column(String(120))
@@ -199,7 +205,8 @@ class Document(Base, TimestampMixin):
     __tablename__ = "documents"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    organization_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"))
     role: Mapped[DocumentRole] = mapped_column(enum_column(DocumentRole, "document_role"))
     filename: Mapped[str] = mapped_column(String(500))
     content_type: Mapped[str | None] = mapped_column(String(200))
@@ -211,7 +218,7 @@ class Document(Base, TimestampMixin):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     current_revision_id: Mapped[str | None] = mapped_column(String(32))
 
-    project: Mapped[Project] = relationship(back_populates="documents")
+    project: Mapped[Project | None] = relationship(back_populates="documents")
     revisions: Mapped[list["DocumentRevision"]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",
@@ -220,6 +227,7 @@ class Document(Base, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("project_id", "sha256", "role", name="uq_document_project_sha_role"),
+        UniqueConstraint("organization_id", "sha256", "role", name="uq_document_org_sha_role"),
     )
 
 
@@ -411,12 +419,8 @@ class RequirementSource(Base):
     __tablename__ = "requirement_sources"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    requirement_id: Mapped[str] = mapped_column(
-        ForeignKey("requirements.id", ondelete="CASCADE")
-    )
-    source_span_id: Mapped[str] = mapped_column(
-        ForeignKey("source_spans.id", ondelete="CASCADE")
-    )
+    requirement_id: Mapped[str] = mapped_column(ForeignKey("requirements.id", ondelete="CASCADE"))
+    source_span_id: Mapped[str] = mapped_column(ForeignKey("source_spans.id", ondelete="CASCADE"))
     relation: Mapped[str] = mapped_column(String(40), default="primary")
 
     requirement: Mapped[Requirement] = relationship(back_populates="sources")
@@ -623,6 +627,7 @@ class FillSuggestion(Base, TimestampMixin):
         enum_column(SuggestionStatus, "suggestion_status"), default=SuggestionStatus.PROPOSED
     )
     evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     reviewed_by: Mapped[str | None] = mapped_column(String(200))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     review_note: Mapped[str | None] = mapped_column(Text)
@@ -753,5 +758,35 @@ class ModelConfig(Base, TimestampMixin):
     api_key_encrypted: Mapped[str] = mapped_column(Text)
     text_model: Mapped[str] = mapped_column(String(200))
     vision_model: Mapped[str | None] = mapped_column(String(200))
+    embedding_model: Mapped[str | None] = mapped_column(String(200))
+    embedding_base_url: Mapped[str | None] = mapped_column(String(500))
+    embedding_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    embedding_dimensions: Mapped[int | None] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EmbeddingRecord(Base):
+    __tablename__ = "embedding_records"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_signature: Mapped[str] = mapped_column(String(64), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    vector: Mapped[list[float]] = mapped_column(JSON)
+
+
+class SearchChunk(Base):
+    __tablename__ = "search_chunks"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    revision_id: Mapped[str] = mapped_column(
+        ForeignKey("document_revisions.id", ondelete="CASCADE")
+    )
+    page_id: Mapped[str] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"))
+    source_span_id: Mapped[str] = mapped_column(ForeignKey("source_spans.id", ondelete="CASCADE"))
+    text: Mapped[str] = mapped_column(Text)
+    tokens: Mapped[str] = mapped_column(Text)
+    embedding_id: Mapped[str | None] = mapped_column(ForeignKey("embedding_records.id"))

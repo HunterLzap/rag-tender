@@ -27,6 +27,7 @@ from app.models import (
     FillTarget,
     Job,
     ModelConfig,
+    Organization,
     Page,
     Project,
     Requirement,
@@ -87,6 +88,7 @@ from app.services.fill import (
 )
 from app.services.freshness import mark_project_stale
 from app.services.jobs import enqueue, request_cancel
+from app.services.library import evidence_scope, mark_organization_stale
 from app.services.model_gateway import test_model
 from app.storage import store_upload
 
@@ -97,10 +99,11 @@ def _page_document_filename(span: SourceSpan, document: Document | None) -> str 
     return document.filename if document else None
 
 
-def _document_read(document: Document) -> DocumentRead:
+def _document_read(document: Document, *, evidence_count: int | None = None) -> DocumentRead:
     return DocumentRead(
         id=document.id,
         project_id=document.project_id,
+        organization_id=document.organization_id,
         role=document.role,
         filename=document.filename,
         content_type=document.content_type,
@@ -109,14 +112,42 @@ def _document_read(document: Document) -> DocumentRead:
         page_count=document.page_count,
         current_revision_id=document.current_revision_id,
         current_page_count=document.page_count,
-        parse_status=(document.metadata_json or {}).get("parse_status") or (
-            "needs_review" if (document.metadata_json or {}).get("pages_needing_review")
-            else "completed" if document.current_revision_id else "pending"
+        parse_status=(document.metadata_json or {}).get("parse_status")
+        or (
+            "needs_review"
+            if (document.metadata_json or {}).get("pages_needing_review")
+            else "completed"
+            if document.current_revision_id
+            else "pending"
         ),
         parse_error=(document.metadata_json or {}).get("parse_error"),
+        ai_status=(document.metadata_json or {}).get("ai_status", "pending"),
+        ai_error=(document.metadata_json or {}).get("ai_error"),
+        evidence_count=evidence_count
+        if evidence_count is not None
+        else (document.metadata_json or {}).get("evidence_count", 0),
         supersedes_id=document.supersedes_id,
         created_at=document.created_at,
     )
+
+
+async def _read_documents(session: AsyncSession, documents) -> list[DocumentRead]:
+    counts = dict(
+        (
+            await session.execute(
+                select(SourceSpan.document_id, func.count(EvidenceItem.id))
+                .join(EvidenceItem, EvidenceItem.source_span_id == SourceSpan.id)
+                .join(Document, Document.id == SourceSpan.document_id)
+                .where(
+                    Document.id.in_([item.id for item in documents]),
+                    SourceSpan.revision_id == Document.current_revision_id,
+                    EvidenceItem.status != "archived",
+                )
+                .group_by(SourceSpan.document_id)
+            )
+        ).all()
+    )
+    return [_document_read(item, evidence_count=counts.get(item.id, 0)) for item in documents]
 
 
 @router.get("/health")
@@ -132,8 +163,8 @@ async def health() -> dict:
 @router.get("/projects", response_model=list[ProjectRead])
 async def list_projects(session: AsyncSession = Depends(get_session)):
     projects = (
-        await session.execute(select(Project).order_by(Project.updated_at.desc()))
-    ).scalars().all()
+        (await session.execute(select(Project).order_by(Project.updated_at.desc()))).scalars().all()
+    )
     result: list[ProjectRead] = []
     for project in projects:
         document_count = (
@@ -162,6 +193,8 @@ async def list_projects(session: AsyncSession = Depends(get_session)):
 
 @router.post("/projects", response_model=ProjectRead, status_code=201)
 async def create_project(payload: ProjectCreate, session: AsyncSession = Depends(get_session)):
+    if payload.organization_id and await session.get(Organization, payload.organization_id) is None:
+        raise HTTPException(400, "企业不存在")
     project = Project(**payload.model_dump())
     session.add(project)
     await session.commit()
@@ -184,10 +217,27 @@ async def update_project(
     if project is None:
         raise HTTPException(404, "项目不存在")
     data = payload.model_dump(exclude_unset=True)
-    if "bid_deadline" in data and data["bid_deadline"] != project.bid_deadline:
+    if (
+        data.get("organization_id")
+        and await session.get(Organization, data["organization_id"]) is None
+    ):
+        raise HTTPException(400, "企业不存在")
+    if any(
+        key in data and data[key] != getattr(project, key)
+        for key in (
+            "bid_deadline",
+            "organization_id",
+            "bidder_name",
+        )
+    ):
         await mark_project_stale(session, project_id)
     for key, value in data.items():
         setattr(project, key, value)
+    await session.flush()
+    if project.auto_analyze and project.status == "active":
+        from app.services.pipeline import schedule_analysis
+
+        await schedule_analysis(session, project, automatic=True)
     await session.commit()
     return ProjectRead(**project.__dict__)
 
@@ -195,10 +245,14 @@ async def update_project(
 @router.get("/projects/{project_id}/bids", response_model=list[BidRead])
 async def list_bids(project_id: str, session: AsyncSession = Depends(get_session)):
     return (
-        await session.execute(
-            select(Bid).where(Bid.project_id == project_id).order_by(Bid.created_at.desc())
+        (
+            await session.execute(
+                select(Bid).where(Bid.project_id == project_id).order_by(Bid.created_at.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
 
 @router.post("/projects/{project_id}/bids", response_model=BidRead, status_code=201)
@@ -262,11 +316,13 @@ async def upload_document(
         raise HTTPException(413, "文件超过上传大小限制")
     stored = store_upload(file.filename or "document.bin", content)
     duplicate = (
-        await session.execute(select(Document.id).where(
-            Document.project_id == project_id,
-            Document.sha256 == stored.sha256,
-            Document.role == role,
-        ))
+        await session.execute(
+            select(Document.id).where(
+                Document.project_id == project_id,
+                Document.sha256 == stored.sha256,
+                Document.role == role,
+            )
+        )
     ).scalar_one_or_none()
     if duplicate:
         raise HTTPException(409, "该文件已按相同用途上传，无需重复上传")
@@ -295,13 +351,17 @@ async def upload_document(
 @router.get("/projects/{project_id}/documents", response_model=list[DocumentRead])
 async def list_documents(project_id: str, session: AsyncSession = Depends(get_session)):
     documents = (
-        await session.execute(
-            select(Document)
-            .where(Document.project_id == project_id)
-            .order_by(Document.created_at.desc())
+        (
+            await session.execute(
+                select(Document)
+                .where(Document.project_id == project_id)
+                .order_by(Document.created_at.desc())
+            )
         )
-    ).scalars().all()
-    return [_document_read(document) for document in documents]
+        .scalars()
+        .all()
+    )
+    return await _read_documents(session, documents)
 
 
 @router.get("/documents/{document_id}", response_model=DocumentRead)
@@ -309,7 +369,7 @@ async def get_document(document_id: str, session: AsyncSession = Depends(get_ses
     document = await session.get(Document, document_id)
     if document is None:
         raise HTTPException(404, "文档不存在")
-    return _document_read(document)
+    return (await _read_documents(session, [document]))[0]
 
 
 @router.get("/documents/{document_id}/pages", response_model=list[PageRead])
@@ -318,12 +378,16 @@ async def list_pages(document_id: str, session: AsyncSession = Depends(get_sessi
     if document is None or not document.current_revision_id:
         return []
     pages = (
-        await session.execute(
-            select(Page)
-            .where(Page.revision_id == document.current_revision_id)
-            .order_by(Page.page_index)
+        (
+            await session.execute(
+                select(Page)
+                .where(Page.revision_id == document.current_revision_id)
+                .order_by(Page.page_index)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return pages
 
 
@@ -333,13 +397,17 @@ async def get_page(page_id: str, session: AsyncSession = Depends(get_session)):
     if page is None:
         raise HTTPException(404, "页面不存在")
     blocks = (
-        await session.execute(
-            select(Block)
-            .options(selectinload(Block.cells))
-            .where(Block.page_id == page_id)
-            .order_by(Block.reading_order)
+        (
+            await session.execute(
+                select(Block)
+                .options(selectinload(Block.cells))
+                .where(Block.page_id == page_id)
+                .order_by(Block.reading_order)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     detail = PageDetail(**page.__dict__)
     detail.blocks = [BlockRead(**block.__dict__) for block in blocks]
     return detail
@@ -367,15 +435,19 @@ async def create_analysis_run(
     if project is None:
         raise HTTPException(404, "项目不存在")
     documents = (
-        await session.execute(
-            select(Document).where(
-                Document.project_id == project_id,
-                Document.role.in_(
-                    [DocumentRole.TENDER, DocumentRole.ADDENDUM, DocumentRole.QA]
-                ),
+        (
+            await session.execute(
+                select(Document).where(
+                    Document.project_id == project_id,
+                    Document.role.in_(
+                        [DocumentRole.TENDER, DocumentRole.ADDENDUM, DocumentRole.QA]
+                    ),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not documents or any(not document.current_revision_id for document in documents):
         raise HTTPException(400, "请先完成全部招标、补遗和答疑文件的解析")
     if payload.mode == "manual":
@@ -386,7 +458,8 @@ async def create_analysis_run(
             progress=100,
             input_snapshot=[
                 {
-                    "document_id": document.id, "revision_id": document.current_revision_id,
+                    "document_id": document.id,
+                    "revision_id": document.current_revision_id,
                     "text_version": (document.metadata_json or {}).get("text_version", 0),
                 }
                 for document in documents
@@ -401,55 +474,20 @@ async def create_analysis_run(
         await build_checklist(session, run.id)
         await session.commit()
         return AnalysisRunRead(**run.__dict__)
-    model_config = None
-    if payload.model_config_id:
-        model_config = await session.get(ModelConfig, payload.model_config_id)
-        if model_config is None or not model_config.is_active:
-            raise HTTPException(400, "指定的模型配置不可用")
-    else:
-        model_config = (
-            await session.execute(
-                select(ModelConfig)
-                .where(ModelConfig.is_active.is_(True))
-                .order_by(ModelConfig.updated_at.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-    if model_config is None:
-        from app.config import get_settings
+    from app.services.model_gateway import ModelGatewayError
+    from app.services.pipeline import schedule_analysis
 
-        if not get_settings().auto_create_schema:
-            raise HTTPException(400, "请先在模型配置页保存并启用一个模型")
-    # Tests and offline fixture mode intentionally exercise extraction through a mock.
-    # Production startup uses migrations and requires a model configuration.
-    bid = (
-        await session.execute(
-            select(Bid).where(Bid.project_id == project_id).order_by(Bid.created_at.desc()).limit(1)
+    try:
+        scheduled = await schedule_analysis(
+            session,
+            project,
+            config_id=payload.model_config_id,
+            prompt_version=payload.prompt_version,
+            ruleset_version=payload.ruleset_version,
         )
-    ).scalar_one_or_none()
-    run = AnalysisRun(
-        project_id=project_id,
-        bid_id=bid.id if bid else None,
-        prompt_version=payload.prompt_version,
-        ruleset_version=payload.ruleset_version,
-        model_snapshot={
-            "model_config_id": model_config.id,
-            "provider": model_config.provider,
-            "text_model": model_config.text_model,
-            "vision_model": model_config.vision_model,
-        } if model_config else {},
-    )
-    session.add(run)
-    await session.flush()
-    job = await enqueue(
-        session,
-        "analyze_project",
-        {
-            "run_id": run.id,
-            "model_config_id": model_config.id if model_config else None,
-            "_dedupe_key": f"analyze:{run.id}",
-        },
-    )
+    except ModelGatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    run, job = scheduled
     await session.commit()
     return AnalysisRunRead(**run.__dict__, job_id=job.id)
 
@@ -457,12 +495,16 @@ async def create_analysis_run(
 @router.get("/projects/{project_id}/analysis-runs", response_model=list[AnalysisRunRead])
 async def list_runs(project_id: str, session: AsyncSession = Depends(get_session)):
     runs = (
-        await session.execute(
-            select(AnalysisRun)
-            .where(AnalysisRun.project_id == project_id)
-            .order_by(AnalysisRun.created_at.desc())
+        (
+            await session.execute(
+                select(AnalysisRun)
+                .where(AnalysisRun.project_id == project_id)
+                .order_by(AnalysisRun.created_at.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     result = []
     for run in runs:
         count = (
@@ -490,14 +532,18 @@ async def get_run(run_id: str, session: AsyncSession = Depends(get_session)):
 @router.get("/analysis-runs/{run_id}/requirements", response_model=list[RequirementRead])
 async def list_requirements(run_id: str, session: AsyncSession = Depends(get_session)):
     rows = (
-        await session.execute(
-            select(Requirement)
-            .join(SourceSpan, SourceSpan.id == Requirement.source_span_id)
-            .options(selectinload(Requirement.source_span))
-            .where(Requirement.run_id == run_id)
-            .order_by(Requirement.created_at)
+        (
+            await session.execute(
+                select(Requirement)
+                .join(SourceSpan, SourceSpan.id == Requirement.source_span_id)
+                .options(selectinload(Requirement.source_span))
+                .where(Requirement.run_id == run_id)
+                .order_by(Requirement.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     result = []
     for requirement in rows:
         document = await session.get(Document, requirement.source_span.document_id)
@@ -548,7 +594,8 @@ async def update_requirement(
     await session.commit()
     return (
         await session.execute(
-            select(Requirement).options(selectinload(Requirement.source_span))
+            select(Requirement)
+            .options(selectinload(Requirement.source_span))
             .where(Requirement.id == requirement_id)
             .execution_options(populate_existing=True)
         )
@@ -558,14 +605,18 @@ async def update_requirement(
 @router.get("/analysis-runs/{run_id}/decisions", response_model=list[DecisionRead])
 async def list_decisions(run_id: str, session: AsyncSession = Depends(get_session)):
     decisions = (
-        await session.execute(
-            select(Decision)
-            .options(selectinload(Decision.requirement).selectinload(Requirement.source_span))
-            .options(selectinload(Decision.reviews))
-            .where(Decision.run_id == run_id)
-            .order_by(Decision.created_at)
+        (
+            await session.execute(
+                select(Decision)
+                .options(selectinload(Decision.requirement).selectinload(Requirement.source_span))
+                .options(selectinload(Decision.reviews))
+                .where(Decision.run_id == run_id)
+                .order_by(Decision.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return decisions
 
 
@@ -580,13 +631,18 @@ async def create_review(
         raise HTTPException(404, "判定不存在")
     if payload.evidence_ids is not None:
         run = await session.get(AnalysisRun, decision.run_id)
+        project = await session.get(Project, run.project_id)
         evidence_ids = set(payload.evidence_ids)
-        allowed = set((
-            await session.execute(select(EvidenceItem.id).where(
-                EvidenceItem.project_id == run.project_id,
-                EvidenceItem.id.in_(evidence_ids),
-            ))
-        ).scalars())
+        allowed = set(
+            (
+                await session.execute(
+                    select(EvidenceItem.id).where(
+                        evidence_scope(project),
+                        EvidenceItem.id.in_(evidence_ids),
+                    )
+                )
+            ).scalars()
+        )
         if allowed != evidence_ids:
             raise HTTPException(400, "请选择当前项目的证据资料")
         decision.evidence_ids = list(dict.fromkeys(payload.evidence_ids))
@@ -612,15 +668,28 @@ async def create_review(
 
 @router.get("/projects/{project_id}/evidence", response_model=list[EvidenceRead])
 async def list_evidence(project_id: str, session: AsyncSession = Depends(get_session)):
+    project = await session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "项目不存在")
     evidence = (
-        await session.execute(
-            select(EvidenceItem)
-            .options(selectinload(EvidenceItem.facts))
-            .options(selectinload(EvidenceItem.source_span))
-            .where((EvidenceItem.project_id == project_id) | (EvidenceItem.project_id.is_(None)))
-            .order_by(EvidenceItem.created_at.desc())
+        (
+            await session.execute(
+                select(EvidenceItem)
+                .options(selectinload(EvidenceItem.facts).selectinload(EvidenceFact.source_span))
+                .options(selectinload(EvidenceItem.source_span))
+                .join(SourceSpan, SourceSpan.id == EvidenceItem.source_span_id)
+                .join(Document, Document.id == SourceSpan.document_id)
+                .where(
+                    evidence_scope(project),
+                    SourceSpan.revision_id == Document.current_revision_id,
+                    EvidenceItem.status != "archived",
+                )
+                .order_by(EvidenceItem.created_at.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return evidence
 
 
@@ -637,13 +706,19 @@ async def create_evidence(
     if span is None:
         raise HTTPException(400, "证据必须绑定一个有效来源片段")
     source_document = await session.get(Document, span.document_id)
-    if source_document is None or source_document.project_id != project_id:
-        raise HTTPException(400, "请选择当前项目内的证明材料来源")
-    fingerprint = __import__("hashlib").sha256(
-        f"{payload.kind}|{payload.title}|{payload.identifier or ''}".encode()
-    ).hexdigest()
+    if source_document is None or not (
+        source_document.project_id == project_id
+        or (project.organization_id and source_document.organization_id == project.organization_id)
+    ):
+        raise HTTPException(400, "请选择当前项目或所属企业的证明材料来源")
+    fingerprint = (
+        __import__("hashlib")
+        .sha256(f"{payload.kind}|{payload.title}|{payload.identifier or ''}".encode())
+        .hexdigest()
+    )
     evidence = EvidenceItem(
-        project_id=project_id,
+        project_id=None if source_document.organization_id else project_id,
+        organization_id=source_document.organization_id,
         kind=payload.kind,
         title=payload.title,
         holder=payload.holder,
@@ -666,7 +741,10 @@ async def create_evidence(
             )
         )
     await enrich_evidence_facts(session, evidence, payload.payload)
-    await mark_project_stale(session, project_id)
+    if evidence.organization_id:
+        await mark_organization_stale(session, evidence.organization_id)
+    else:
+        await mark_project_stale(session, project_id)
     await session.commit()
     return await _load_evidence(session, evidence.id)
 
@@ -683,10 +761,33 @@ async def update_evidence(
     data = payload.model_dump(exclude_unset=True)
     for key, value in data.items():
         setattr(evidence, key, value)
-    if any(key in data for key in ("payload", "valid_until", "holder", "review_status")):
+    if "payload" in data:
         await session.execute(delete(EvidenceFact).where(EvidenceFact.evidence_id == evidence_id))
         await enrich_evidence_facts(session, evidence, evidence.payload)
-    await mark_project_stale(session, evidence.project_id)
+    else:
+        facts = (
+            (
+                await session.execute(
+                    select(EvidenceFact).where(EvidenceFact.evidence_id == evidence_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for fact in facts:
+            if "review_status" in data:
+                fact.review_status = evidence.review_status
+            if "holder" in data:
+                fact.holder = evidence.holder
+            if "valid_until" in data and fact.fact_key in {"valid_until", "expiry_date"}:
+                fact.value_date = evidence.valid_until
+    if evidence.organization_id:
+        await mark_organization_stale(session, evidence.organization_id)
+    else:
+        await mark_project_stale(session, evidence.project_id)
+    from app.services.pipeline import schedule_related_projects
+
+    await schedule_related_projects(session, evidence)
     await session.commit()
     return await _load_evidence(session, evidence.id)
 
@@ -695,7 +796,7 @@ async def _load_evidence(session: AsyncSession, evidence_id: str) -> EvidenceIte
     return (
         await session.execute(
             select(EvidenceItem)
-            .options(selectinload(EvidenceItem.facts))
+            .options(selectinload(EvidenceItem.facts).selectinload(EvidenceFact.source_span))
             .options(selectinload(EvidenceItem.source_span))
             .where(EvidenceItem.id == evidence_id)
         )
@@ -703,16 +804,18 @@ async def _load_evidence(session: AsyncSession, evidence_id: str) -> EvidenceIte
 
 
 @router.get("/projects/{project_id}/response-values", response_model=list[ResponseValueRead])
-async def list_response_values(
-    project_id: str, session: AsyncSession = Depends(get_session)
-):
+async def list_response_values(project_id: str, session: AsyncSession = Depends(get_session)):
     return (
-        await session.execute(
-            select(ResponseValue)
-            .where(ResponseValue.project_id == project_id)
-            .order_by(ResponseValue.label)
+        (
+            await session.execute(
+                select(ResponseValue)
+                .where(ResponseValue.project_id == project_id)
+                .order_by(ResponseValue.label)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
 
 @router.post(
@@ -742,6 +845,11 @@ async def create_response_value(
         raise HTTPException(409, "响应值键已存在，请编辑已有记录")
     value = ResponseValue(project_id=project_id, **payload.model_dump())
     session.add(value)
+    await mark_project_stale(session, project_id)
+    from app.services.pipeline import schedule_analysis
+
+    if project.auto_analyze and project.status == "active":
+        await schedule_analysis(session, project, automatic=True)
     await session.commit()
     return value
 
@@ -761,18 +869,28 @@ async def update_response_value(
     for key, field in data.items():
         setattr(value, key, field)
     value.version += 1
+    await mark_project_stale(session, value.project_id)
+    project = await session.get(Project, value.project_id)
+    from app.services.pipeline import schedule_analysis
+
+    if project.auto_analyze and project.status == "active":
+        await schedule_analysis(session, project, automatic=True)
     await session.commit()
     return value
 
 
 @router.delete("/response-values/{value_id}", status_code=204)
-async def delete_response_value(
-    value_id: str, session: AsyncSession = Depends(get_session)
-):
+async def delete_response_value(value_id: str, session: AsyncSession = Depends(get_session)):
     value = await session.get(ResponseValue, value_id)
     if value is None:
         raise HTTPException(404, "响应值不存在")
+    project = await session.get(Project, value.project_id)
+    await mark_project_stale(session, value.project_id)
     await session.delete(value)
+    from app.services.pipeline import schedule_analysis
+
+    if project.auto_analyze and project.status == "active":
+        await schedule_analysis(session, project, automatic=True)
     await session.commit()
 
 
@@ -787,12 +905,16 @@ async def get_job(job_id: str, session: AsyncSession = Depends(get_session)):
 @router.get("/projects/{project_id}/jobs", response_model=list[JobRead])
 async def list_jobs(project_id: str, session: AsyncSession = Depends(get_session)):
     jobs = (
-        await session.execute(
-            select(Job)
-            .where(Job.payload["project_id"].as_string() == project_id)
-            .order_by(Job.created_at.desc())
+        (
+            await session.execute(
+                select(Job)
+                .where(Job.payload["project_id"].as_string() == project_id)
+                .order_by(Job.created_at.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return jobs
 
 
@@ -817,19 +939,30 @@ async def create_model_config(
         api_key_encrypted=encrypt_secret(payload.api_key),
         text_model=payload.text_model,
         vision_model=payload.vision_model,
+        embedding_model=payload.embedding_model,
+        embedding_base_url=payload.embedding_base_url,
+        embedding_api_key_encrypted=encrypt_secret(payload.embedding_api_key)
+        if payload.embedding_api_key
+        else None,
+        embedding_dimensions=payload.embedding_dimensions,
         is_active=payload.is_active,
         config_json=payload.config_json,
     )
     session.add(config)
     await session.commit()
+    from app.services.pipeline import resume_pending_documents
+
+    await resume_pending_documents(session)
     return _model_config_read(config, payload.api_key)
 
 
 @router.get("/model-configs", response_model=list[ModelConfigRead])
 async def list_model_configs(session: AsyncSession = Depends(get_session)):
     configs = (
-        await session.execute(select(ModelConfig).order_by(ModelConfig.updated_at.desc()))
-    ).scalars().all()
+        (await session.execute(select(ModelConfig).order_by(ModelConfig.updated_at.desc())))
+        .scalars()
+        .all()
+    )
     return [_model_config_read(config, "") for config in configs]
 
 
@@ -850,9 +983,7 @@ async def test_config(
         model = model or config.text_model
     if not base_url or not api_key:
         raise HTTPException(400, "测试连接需要 base_url 和 api_key")
-    success, latency, message = await test_model(
-        base_url=base_url, api_key=api_key, model=model
-    )
+    success, latency, message = await test_model(base_url=base_url, api_key=api_key, model=model)
     return ModelTestResult(success=success, latency_ms=latency, message=message)
 
 
@@ -865,6 +996,10 @@ def _model_config_read(config: ModelConfig, key: str) -> ModelConfigRead:
         api_key_masked=mask_secret(key) if key else "****",
         text_model=config.text_model,
         vision_model=config.vision_model,
+        embedding_model=config.embedding_model,
+        embedding_base_url=config.embedding_base_url,
+        embedding_api_key_masked="****" if config.embedding_api_key_encrypted else "沿用主模型密钥",
+        embedding_dimensions=config.embedding_dimensions,
         is_active=config.is_active,
         config_json=config.config_json,
         created_at=config.created_at,
@@ -873,9 +1008,7 @@ def _model_config_read(config: ModelConfig, key: str) -> ModelConfigRead:
 
 
 @router.post("/documents/{document_id}/fill-scan", response_model=list[FillSlotRead])
-async def scan_fill(
-    document_id: str, session: AsyncSession = Depends(get_session)
-):
+async def scan_fill(document_id: str, session: AsyncSession = Depends(get_session)):
     document = await session.get(Document, document_id)
     if document is None:
         raise HTTPException(404, "文档不存在")
@@ -962,20 +1095,28 @@ async def _load_fill_plan(session: AsyncSession, plan_id: str) -> FillPlanRead:
     if plan is None:
         raise HTTPException(404, "填写计划不存在")
     targets = (
-        await session.execute(
-            select(FillTarget)
-            .options(selectinload(FillTarget.suggestions))
-            .where(FillTarget.plan_id == plan_id)
-            .order_by(FillTarget.created_at)
+        (
+            await session.execute(
+                select(FillTarget)
+                .options(selectinload(FillTarget.suggestions))
+                .where(FillTarget.plan_id == plan_id)
+                .order_by(FillTarget.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assets = (
-        await session.execute(
-            select(AnnotationAsset)
-            .where(AnnotationAsset.plan_id == plan_id)
-            .order_by(AnnotationAsset.created_at)
+        (
+            await session.execute(
+                select(AnnotationAsset)
+                .where(AnnotationAsset.plan_id == plan_id)
+                .order_by(AnnotationAsset.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return FillPlanRead(
         **plan.__dict__,
         targets=[FillTargetRead.model_validate(target) for target in targets],
@@ -1023,12 +1164,16 @@ async def get_annotation_image(asset_id: str, session: AsyncSession = Depends(ge
 @router.get("/analysis-runs/{run_id}/checklist", response_model=list[ChecklistRead])
 async def list_checklist(run_id: str, session: AsyncSession = Depends(get_session)):
     return (
-        await session.execute(
-            select(ChecklistItem)
-            .where(ChecklistItem.run_id == run_id)
-            .order_by(ChecklistItem.created_at)
+        (
+            await session.execute(
+                select(ChecklistItem)
+                .where(ChecklistItem.run_id == run_id)
+                .order_by(ChecklistItem.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
 
 @router.patch("/checklist/{item_id}", response_model=ChecklistRead)
@@ -1051,36 +1196,48 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
     if run is None:
         raise HTTPException(404, "分析任务不存在")
     decisions = (
-        await session.execute(
-            select(Decision)
-            .options(selectinload(Decision.requirement).selectinload(Requirement.source_span))
-            .options(selectinload(Decision.reviews))
-            .where(Decision.run_id == run_id)
-            .order_by(Decision.created_at)
+        (
+            await session.execute(
+                select(Decision)
+                .options(selectinload(Decision.requirement).selectinload(Requirement.source_span))
+                .options(selectinload(Decision.reviews))
+                .where(Decision.run_id == run_id)
+                .order_by(Decision.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     summary = {status.value: 0 for status in DecisionStatus}
     project = await session.get(Project, run.project_id)
     decision_labels = {
-        "met": "符合", "not_met": "不符合",
-        "needs_review": "待人工复核", "not_applicable": "不适用",
+        "met": "符合",
+        "not_met": "不符合",
+        "needs_review": "待人工复核",
+        "not_applicable": "不适用",
     }
     mode_label = (
         "人工核对（未执行模型提取）"
-        if run.model_snapshot.get("execution_mode") == "manual" else "模型分析与人工复核"
+        if run.model_snapshot.get("execution_mode") == "manual"
+        else "模型分析与人工复核"
     )
     status_labels = {
-        "completed": "已完成", "needs_review": "待人工复核",
-        "stale": "资料已更新，旧结论待重新核对", "failed": "分析未完成",
+        "completed": "已完成",
+        "needs_review": "待人工复核",
+        "stale": "资料已更新，旧结论待重新核对",
+        "failed": "分析未完成",
     }
     lines = [
-        "# 投标准备检查报告", "",
+        "# 投标准备检查报告",
+        "",
         f"项目：{project.name if project else '未命名项目'}",
         f"招标编号：{project.tender_no or '未填写' if project else '未填写'}",
         f"工作方式：{mode_label}",
         f"分析状态：{status_labels.get(run.status.value, '处理中')}",
         f"生成时间：{datetime.now(UTC).isoformat()}",
-        "", "## 要求核对结果", "",
+        "",
+        "## 要求核对结果",
+        "",
     ]
     for decision in decisions:
         summary[decision.status.value] += 1
@@ -1106,19 +1263,32 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
                 f"- 人工复核（{review.created_at.isoformat()}）："
                 f"{decision_labels.get(review.new_status, review.new_status)}；{review.reason}"
             )
-        evidence = (await session.execute(
-            select(EvidenceItem).where(EvidenceItem.id.in_(decision.evidence_ids))
-        )).scalars().all()
+        evidence = (
+            (
+                await session.execute(
+                    select(EvidenceItem).where(EvidenceItem.id.in_(decision.evidence_ids))
+                )
+            )
+            .scalars()
+            .all()
+        )
         for item in evidence:
             lines.append(f"- 支持证据：{item.title}（{item.holder or '主体未填写'}）")
         lines.append("")
     if run.coverage_notes:
-        lines.extend([
-            "## 提取范围与人工核验", "", *[f"- {note}" for note in run.coverage_notes], "",
-        ])
+        lines.extend(
+            [
+                "## 提取范围与人工核验",
+                "",
+                *[f"- {note}" for note in run.coverage_notes],
+                "",
+            ]
+        )
     checklist = (
-        await session.execute(select(ChecklistItem).where(ChecklistItem.run_id == run_id))
-    ).scalars().all()
+        (await session.execute(select(ChecklistItem).where(ChecklistItem.run_id == run_id)))
+        .scalars()
+        .all()
+    )
     lines.extend(["## 交付检查清单", ""])
     for item in checklist:
         lines.append(f"- [{'x' if item.completed else ' '}] {item.title}")
@@ -1139,17 +1309,25 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
     ).all()
     lines.extend(["", "## 模板填写建议", ""])
     suggestion_labels = {
-        "accepted": "已确认", "edited": "已修改", "proposed": "待确认",
-        "missing_evidence": "待补充", "rejected": "未采用",
+        "accepted": "已确认",
+        "edited": "已修改",
+        "proposed": "待确认",
+        "missing_evidence": "待补充",
+        "rejected": "未采用",
     }
     for target, suggestion, document, page in fill_rows:
         value = suggestion.value if suggestion and suggestion.value else "尚未填写"
         status = suggestion_labels.get(suggestion.status, "待补充") if suggestion else "待补充"
-        lines.extend([
-            f"### {target.label}", "",
-            f"- 位置：{document.filename} · 第 {page.page_index + 1} 页",
-            f"- 状态：{status}", f"- 内容：{value}", "",
-        ])
+        lines.extend(
+            [
+                f"### {target.label}",
+                "",
+                f"- 位置：{document.filename} · 第 {page.page_index + 1} 页",
+                f"- 状态：{status}",
+                f"- 内容：{value}",
+                "",
+            ]
+        )
     if not fill_rows:
         lines.append("尚未生成填写建议。")
     return ReportRead(

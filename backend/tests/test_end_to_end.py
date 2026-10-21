@@ -12,53 +12,9 @@ from app.services.jobs import worker_loop
 SAMPLE = Path(__file__).parents[2] / "samples" / "控制柜配电柜变频柜采购招标公告_样本.pdf"
 
 
-def test_mock_model_pipeline_and_fill_review(monkeypatch, empty_table_pdf):
-    from app.services import extraction
-    from app.services.model_eval import SemanticAssessment
-
-    async def fake_structured_text(
-        _session,
-        *,
-        system,
-        user,
-        output_model,
-        **_kwargs,
-    ):
-        if output_model is extraction.ExtractedRequirements:
-            import json
-            import re
-
-            match = re.search(r"\{.*\}", user, re.S)
-            if not match:
-                return extraction.ExtractedRequirements()
-            payload = json.loads(match.group(0))
-            candidate = next(
-                (block for block in payload["blocks"] if "设备名称" in block["text"]),
-                None,
-            )
-            if candidate is None:
-                return extraction.ExtractedRequirements()
-            block_id = candidate["block_id"]
-            return extraction.ExtractedRequirements(
-                requirements=[
-                    extraction.ExtractedRequirement(
-                        title="Equipment 响应",
-                        statement="须填写设备名称",
-                        category="submission",
-                        evaluation_stage="compliance",
-                        handling_mode="fill",
-                        block_id=block_id,
-                        quote="设备名称",
-                    )
-                ]
-            )
-        if output_model is SemanticAssessment:
-            return SemanticAssessment(verdict="insufficient", reason="测试")
-        raise AssertionError(output_model)
-
-    monkeypatch.setattr(extraction, "structured_text", fake_structured_text)
+def test_offline_pipeline_and_fill_review(empty_table_pdf):
     with TestClient(app) as client:
-        project = client.post("/api/v2/projects", json={"name": "离线验收（模拟模型）"}).json()
+        project = client.post("/api/v2/projects", json={"name": "离线验收"}).json()
         bid = client.post(
             f"/api/v2/projects/{project['id']}/bids",
             json={
@@ -90,10 +46,32 @@ def test_mock_model_pipeline_and_fill_review(monkeypatch, empty_table_pdf):
 
         asyncio.run(_run_worker_until(client, project["id"], expected_documents=2))
 
-        run = client.post(f"/api/v2/projects/{project['id']}/analysis-runs", json={})
+        run = client.post(
+            f"/api/v2/projects/{project['id']}/analysis-runs", json={"mode": "manual"}
+        )
         assert run.status_code == 201, run.text
         run_id = run.json()["id"]
-        asyncio.run(_run_worker_until(client, project["id"], expected_runs=True))
+        documents = client.get(f"/api/v2/projects/{project['id']}/documents").json()
+        tender = next(item for item in documents if item["role"] == "tender")
+        pages = client.get(f"/api/v2/documents/{tender['id']}/pages").json()
+        source = next(
+            span
+            for page in pages
+            for span in client.get(f"/api/v2/pages/{page['id']}/source-spans").json()
+            if "设备名称" in span["quote"]
+        )
+        requirement = client.post(
+            f"/api/v2/analysis-runs/{run_id}/requirements",
+            json={
+                "title": "Equipment 响应",
+                "statement": "须填写设备名称",
+                "category": "submission",
+                "evaluation_stage": "compliance",
+                "handling_mode": "fill",
+                "source_span_id": source["id"],
+            },
+        )
+        assert requirement.status_code == 201, requirement.text
         details = client.get(f"/api/v2/analysis-runs/{run_id}")
         assert details.status_code == 200, details.text
         assert details.json()["requirement_count"] > 0

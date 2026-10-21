@@ -2,10 +2,17 @@ import { useEffect, useMemo, useState } from 'react';
 import { isAxiosError } from 'axios';
 import {
   Alert,
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Box,
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Grid,
   MenuItem,
   Paper,
@@ -16,6 +23,7 @@ import {
   Typography,
   LinearProgress,
 } from '@mui/material';
+import ExpandMoreRounded from '@mui/icons-material/ExpandMoreRounded';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { ConfirmDialog, EmptyState, Notice } from '../components/Workspace';
@@ -54,6 +62,12 @@ export default function FillPanel({ runId, projectId }: Props) {
   const [editingTarget, setEditingTarget] = useState<FillTarget | null | undefined>(undefined);
   const [deletingTarget, setDeletingTarget] = useState<FillTarget | null>(null);
   const [previewMode, setPreviewMode] = useState('annotation');
+  const [viewingSource, setViewingSource] = useState<FillSuggestion['source_refs'][number] | null>(null);
+  const runtime = useQuery({ queryKey: ['runtime'], queryFn: async () => (await api.get<{ live_model_calls: boolean }>('/health')).data });
+  const sourcePage = useQuery({
+    queryKey: ['page', viewingSource?.page_id], enabled: Boolean(viewingSource?.page_id),
+    queryFn: async () => (await api.get<PageItem>(`/pages/${viewingSource!.page_id}`)).data,
+  });
 
   const documents = useQuery({
     queryKey: ['fill-documents', projectId],
@@ -77,6 +91,7 @@ export default function FillPanel({ runId, projectId }: Props) {
   const plan = useQuery({
     queryKey: ['fill-plan', runId, templateId],
     enabled: Boolean(templateId),
+    refetchInterval: (query) => ['queued', 'drafting'].includes(query.state.data?.status ?? '') ? 2000 : false,
     queryFn: async () => {
       try {
         return (
@@ -107,9 +122,9 @@ export default function FillPanel({ runId, projectId }: Props) {
     if (!selectedTarget || !selectedSuggestion) return;
     setDraftValues((current) => ({
       ...current,
-      [selectedSuggestion.id]: current[selectedSuggestion.id] ?? selectedSuggestion.value ?? '',
+      [selectedSuggestion.id]: selectedSuggestion.value ?? '',
     }));
-  }, [selectedTarget, selectedSuggestion]);
+  }, [selectedSuggestion?.id, selectedSuggestion?.value]);
 
   const save = useMutation({
     onMutate: () => { setError(''); setMessage(''); },
@@ -154,6 +169,14 @@ export default function FillPanel({ runId, projectId }: Props) {
       setSelectedTargetId('');
     },
     onError: (err) => setError(apiError(err, '重建填写计划失败')),
+  });
+  const draft = useMutation({
+    mutationFn: async () => api.post(`/fill-plans/${selectedPlan!.id}/draft`),
+    onSuccess: async () => {
+      setMessage('正在自动起草，已确认的内容会保留');
+      await queryClient.invalidateQueries({ queryKey: ['fill-plan', runId, templateId] });
+    },
+    onError: (err) => setError(apiError(err, '提交起草任务失败')),
   });
   const removeTarget = useMutation({
     mutationFn: async () => (await api.delete<FillPlan>(`/fill-targets/${deletingTarget!.id}`)).data,
@@ -201,6 +224,7 @@ export default function FillPanel({ runId, projectId }: Props) {
     <Stack spacing={2}>
       {error && <Alert severity="error">{error}</Alert>}
       {plan.error && <Alert severity="error">{apiError(plan.error, '加载填写计划失败')}</Alert>}
+      {selectedPlan?.status === 'failed' && <Alert severity="error">AI 起草未完成，已保存的内容仍可查看。请检查模型设置后重新生成。</Alert>}
       <Notice message={message} onClose={() => setMessage('')} />
       <Paper variant="outlined" sx={{ px: 2, pt: 1.5, pb: 1 }}>
         <Stack direction="row" alignItems="center" gap={1.5} flexWrap="wrap">
@@ -220,9 +244,10 @@ export default function FillPanel({ runId, projectId }: Props) {
             ))}
           </TextField>
           <Typography variant="body2" color="text.secondary" sx={{ flex: 1, whiteSpace: 'nowrap' }}>已处理 {reviewed} / {total}</Typography>
-          <Button disabled={rebuild.isPending} onClick={() => rebuild.mutate()}>
-            {rebuild.isPending ? '正在更新…' : '更新填写建议'}
+          <Button disabled={rebuild.isPending || ['queued', 'drafting'].includes(selectedPlan?.status ?? '')} onClick={() => rebuild.mutate()}>
+            {rebuild.isPending ? '正在更新…' : '重新定位'}
           </Button>
+          <Button disabled={!runtime.data?.live_model_calls || !selectedPlan || draft.isPending || ['queued', 'drafting'].includes(selectedPlan.status)} onClick={() => draft.mutate()}>{['queued', 'drafting'].includes(selectedPlan?.status ?? '') ? '正在起草…' : 'AI 生成建议'}</Button>
           <Button variant="outlined" disabled={!selectedPlan || !renderedPages.length} onClick={() => setEditingTarget(null)}>添加填写位置</Button>
         </Stack>
         <LinearProgress variant="determinate" value={total ? reviewed / total * 100 : 0} sx={{ mt: 1.5, height: 2 }} />
@@ -287,8 +312,10 @@ export default function FillPanel({ runId, projectId }: Props) {
                 <Stack spacing={2}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}><Typography variant="h6">{selectedTarget?.label}</Typography><Chip label={statusLabel[selectedSuggestion.status] ?? '待补充'} size="small" /></Stack>
                   {selectedSuggestion.rationale && <Typography variant="caption" color="text.secondary">{selectedSuggestion.rationale.replace(/项目响应值/g, '填写资料')}</Typography>}
+                  {Boolean(selectedSuggestion.source_refs?.length) && <Accordion disableGutters elevation={0} sx={{ border: '1px solid', borderColor: 'divider' }}><AccordionSummary expandIcon={<ExpandMoreRounded />}><Typography variant="body2">填写依据 · {selectedSuggestion.source_refs.length} 处来源</Typography></AccordionSummary><AccordionDetails><Stack spacing={1.5}>{selectedSuggestion.source_refs.map((source, index) => <Box key={source.source_span_id ?? source.response_value_id ?? index}>{source.page_id ? <Button size="small" sx={{ p: 0 }} onClick={() => setViewingSource(source)}>{source.filename ?? '查看原文'}{source.page_index !== undefined ? ` · 第 ${source.page_index + 1} 页` : ''}</Button> : <Typography variant="caption" fontWeight={600}>{source.label ?? '项目填写资料'}</Typography>}<Typography variant="caption" color="text.secondary" display="block" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{source.quote ?? source.value}</Typography></Box>)}</Stack></AccordionDetails></Accordion>}
                   <TextField
                     label="准备填写的内容" multiline minRows={3}
+                    disabled={['queued', 'drafting'].includes(selectedPlan?.status ?? '')}
                     value={draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? ''}
                     onChange={(event) => setDraftValues((current) => ({ ...current, [selectedSuggestion.id]: event.target.value }))}
                   />
@@ -340,6 +367,7 @@ export default function FillPanel({ runId, projectId }: Props) {
         await queryClient.invalidateQueries({ queryKey: ['run', runId] });
       }} />}
       <ConfirmDialog open={Boolean(deletingTarget)} title="移除此填写位置？" description={`将移除「${deletingTarget?.label ?? ''}」及其建议内容和标注。原模板保持原样，更新建议时不会重新添加此位置。`} pending={removeTarget.isPending} onClose={() => setDeletingTarget(null)} onConfirm={() => removeTarget.mutate()} />
+      <Dialog open={Boolean(viewingSource)} onClose={() => setViewingSource(null)} fullWidth maxWidth="md"><DialogTitle>{viewingSource?.filename ?? '填写依据'}</DialogTitle><DialogContent>{sourcePage.isLoading ? <EmptyState loading title="正在加载原文" /> : sourcePage.data ? <PageViewer page={sourcePage.data} highlight={viewingSource?.page_id && viewingSource.bbox_json ? { page_id: viewingSource.page_id, bbox_json: viewingSource.bbox_json, quote: viewingSource.quote ?? '' } : undefined} /> : <EmptyState title="来源页暂不可用" />}</DialogContent><DialogActions><Button onClick={() => setViewingSource(null)}>关闭</Button></DialogActions></Dialog>
     </Stack>
   );
 }

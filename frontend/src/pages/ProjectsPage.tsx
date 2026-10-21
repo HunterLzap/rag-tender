@@ -9,7 +9,7 @@ import SearchRounded from '@mui/icons-material/SearchRounded';
 import ArrowForwardRounded from '@mui/icons-material/ArrowForwardRounded';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from 'react-router-dom';
-import { api, apiError, type Project } from '../lib/api';
+import { api, apiError, type Organization, type Project } from '../lib/api';
 import { formatDate } from '../lib/format';
 import { ConfirmDialog, EmptyState, Notice, PageHeader, StatusChip } from '../components/Workspace';
 
@@ -21,6 +21,7 @@ export default function ProjectsPage() {
   const [deleting, setDeleting] = useState<Project | null>(null);
   const [name, setName] = useState('');
   const [tenderNo, setTenderNo] = useState('');
+  const [organizationId, setOrganizationId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('active');
   const [page, setPage] = useState(0);
@@ -30,10 +31,18 @@ export default function ProjectsPage() {
     queryKey: ['projects'],
     queryFn: async () => (await api.get<Project[]>('/projects')).data,
   });
+  const organizations = useQuery({
+    queryKey: ['organizations'],
+    queryFn: async () => (await api.get<Organization[]>('/organizations')).data,
+  });
+  const selectedOrganization = organizationId ?? (!editing ? organizations.data?.[0]?.id ?? '' : '');
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['projects'] });
   const save = useMutation({
     mutationFn: async () => {
-      const payload = { name: name.trim(), tender_no: tenderNo.trim() || null };
+      const payload = {
+        name: name.trim(), tender_no: tenderNo.trim() || null,
+        organization_id: selectedOrganization || null,
+      };
       return (editing
         ? await api.patch<Project>(`/projects/${editing.id}`, payload)
         : await api.post<Project>('/projects', payload)).data;
@@ -58,6 +67,7 @@ export default function ProjectsPage() {
   });
   function edit(project: Project | null) {
     setEditing(project); setName(project?.name ?? ''); setTenderNo(project?.tender_no ?? '');
+    setOrganizationId(project ? project.organization_id ?? '' : null);
     setError(''); setMessage(''); setOpen(true); save.reset();
   }
   const rows = (projects.data ?? []).filter((project) =>
@@ -98,10 +108,11 @@ export default function ProjectsPage() {
       <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>{editing ? '编辑项目' : '新建投标项目'}</DialogTitle>
         <DialogContent><Stack spacing={2.5} sx={{ pt: 1 }}>
-          <Typography color="text.secondary">{editing ? '修改项目名称和招标编号，已有文件和分析记录会保留。' : '先填写项目基本信息，创建后将进入资料准备页面。'}</Typography>
           {save.isError && <Alert severity="error">{error}</Alert>}
           <TextField label="项目名称" placeholder="例如：2026 年配电柜采购项目" value={name} onChange={(event) => setName(event.target.value)} autoFocus required />
           <TextField label="招标编号（选填）" value={tenderNo} onChange={(event) => setTenderNo(event.target.value)} />
+          <TextField select label="投标企业" value={selectedOrganization} onChange={(event) => setOrganizationId(event.target.value)} helperText="引用企业资料库，材料可跨项目复用。"><MenuItem value="">暂不关联</MenuItem>{organizations.data?.map((item) => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</TextField>
+          {!organizations.data?.length && <Button component={Link} to="/library">先建立企业资料库</Button>}
         </Stack></DialogContent>
         <DialogActions><Button onClick={() => setOpen(false)}>取消</Button><Button variant="contained" disabled={!name.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? '保存中…' : editing ? '保存修改' : '创建并准备资料'}</Button></DialogActions>
       </Dialog>

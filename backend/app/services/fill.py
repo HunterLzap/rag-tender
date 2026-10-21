@@ -27,44 +27,58 @@ from app.models import (
 )
 
 
-async def detect_fill_slots(
-    session: AsyncSession, document: Document
-) -> list[FillSlot]:
+async def detect_fill_slots(session: AsyncSession, document: Document) -> list[FillSlot]:
     if not document.current_revision_id:
         return []
     existing = (
-        await session.execute(
-            select(FillSlot).where(
-                FillSlot.template_revision_id == document.current_revision_id
+        (
+            await session.execute(
+                select(FillSlot).where(
+                    FillSlot.template_revision_id == document.current_revision_id
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if existing:
         return list(existing)
     pages = (
-        await session.execute(
-            select(Page)
-            .where(Page.revision_id == document.current_revision_id)
-            .order_by(Page.page_index)
+        (
+            await session.execute(
+                select(Page)
+                .where(Page.revision_id == document.current_revision_id)
+                .order_by(Page.page_index)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     slots: list[FillSlot] = []
     for page in pages:
         blocks = (
-            await session.execute(
-                select(Block).where(Block.page_id == page.id).order_by(Block.reading_order)
+            (
+                await session.execute(
+                    select(Block).where(Block.page_id == page.id).order_by(Block.reading_order)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for block in blocks:
             if block.kind != "table":
                 continue
             cells = (
-                await session.execute(
-                    select(TableCell)
-                    .where(TableCell.block_id == block.id)
-                    .order_by(TableCell.row_index, TableCell.col_index)
+                (
+                    await session.execute(
+                        select(TableCell)
+                        .where(TableCell.block_id == block.id)
+                        .order_by(TableCell.row_index, TableCell.col_index)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             if not cells:
                 continue
             max_row = max(cell.row_index for cell in cells)
@@ -85,7 +99,8 @@ async def detect_fill_slots(
                 )
                 left = next(
                     (
-                        other for other in reversed(cells)
+                        other
+                        for other in reversed(cells)
                         if other.row_index == cell.row_index
                         and other.col_index + other.col_span == cell.col_index
                         and not _is_placeholder(other.text)
@@ -116,8 +131,10 @@ async def detect_fill_slots(
                 )
                 session.add(slot)
                 slots.append(slot)
-            if max_row == 0 and len(header_labels) >= 2 and all(
-                not _is_placeholder(cell.text) for cell in cells
+            if (
+                max_row == 0
+                and len(header_labels) >= 2
+                and all(not _is_placeholder(cell.text) for cell in cells)
             ):
                 # The header is a reference only; no writable row was located.
                 for cell in cells:
@@ -204,13 +221,14 @@ def _text_field_bbox(block: Block, start: int, end: int) -> list[float]:
         x0, y0, x1, y1 = word["bbox"]
         width = (x1 - x0) / (word["end"] - word["start"])
         boxes.append(
-            [x0 + (left - word["start"]) * width, y0,
-             x0 + (right - word["start"]) * width, y1]
+            [x0 + (left - word["start"]) * width, y0, x0 + (right - word["start"]) * width, y1]
         )
     if boxes:
         return [
-            min(box[0] for box in boxes), min(box[1] for box in boxes),
-            max(box[2] for box in boxes), max(box[3] for box in boxes),
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
         ]
     width = (block.x1 - block.x0) / max(len(block.text), 1)
     return [block.x0 + start * width, block.y0, block.x0 + end * width, block.y1]
@@ -235,23 +253,27 @@ async def create_fill_plan(
         await session.flush()
 
     slots = (
-        await session.execute(
-            select(FillSlot).where(
-                FillSlot.template_revision_id == template_document.current_revision_id,
-                FillSlot.status != FillSlotStatus.IGNORED,
+        (
+            await session.execute(
+                select(FillSlot).where(
+                    FillSlot.template_revision_id == template_document.current_revision_id,
+                    FillSlot.status != FillSlotStatus.IGNORED,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     requirements = (
-        await session.execute(
-            select(Requirement).where(Requirement.run_id == run_id)
-        )
-    ).scalars().all()
+        (await session.execute(select(Requirement).where(Requirement.run_id == run_id)))
+        .scalars()
+        .all()
+    )
     response_values = (
-        await session.execute(
-            select(ResponseValue).where(ResponseValue.project_id == project_id)
-        )
-    ).scalars().all()
+        (await session.execute(select(ResponseValue).where(ResponseValue.project_id == project_id)))
+        .scalars()
+        .all()
+    )
     for slot in slots:
         suggestion = _match_response_value(slot.label, response_values)
         related = _match_requirement(slot.label, requirements)
@@ -277,12 +299,20 @@ async def create_fill_plan(
                     confidence=1.0,
                     status=SuggestionStatus.PROPOSED,
                     evidence_ids=suggestion.evidence_ids,
+                    source_refs=[
+                        {
+                            "response_value_id": suggestion.id,
+                            "label": suggestion.label,
+                            "value": suggestion.value_text,
+                        }
+                    ],
                 )
             )
         else:
             rationale = (
                 f"对应要求：{related.title}；请补充填写值及依据"
-                if related else f"请补充「{slot.label}」的填写值及依据"
+                if related
+                else f"请补充「{slot.label}」的填写值及依据"
             )
             if slot.kind == FillTargetKind.SIGNATURE:
                 rationale = "此处需人工签字或盖章，确认实际办理后再接受"
@@ -307,16 +337,21 @@ async def rebuild_fill_plan(
     project_id: str,
 ) -> FillPlan:
     targets = (
-        await session.execute(
-            select(FillTarget)
-            .options(selectinload(FillTarget.suggestions))
-            .where(FillTarget.plan_id == plan.id)
+        (
+            await session.execute(
+                select(FillTarget)
+                .options(selectinload(FillTarget.suggestions))
+                .where(FillTarget.plan_id == plan.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     reviewed = {
         target.fill_slot_id: target.suggestions[0]
         for target in targets
-        if target.fill_slot_id and target.suggestions
+        if target.fill_slot_id
+        and target.suggestions
         and target.suggestions[0].status
         in {SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED, SuggestionStatus.REJECTED}
     }
@@ -336,12 +371,16 @@ async def rebuild_fill_plan(
         plan=plan,
     )
     refreshed = (
-        await session.execute(
-            select(FillTarget)
-            .options(selectinload(FillTarget.suggestions))
-            .where(FillTarget.plan_id == rebuilt.id)
+        (
+            await session.execute(
+                select(FillTarget)
+                .options(selectinload(FillTarget.suggestions))
+                .where(FillTarget.plan_id == rebuilt.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for target in refreshed:
         suggestion = reviewed.get(target.fill_slot_id)
         if suggestion is None:
@@ -355,6 +394,7 @@ async def rebuild_fill_plan(
                 confidence=suggestion.confidence,
                 status=suggestion.status,
                 evidence_ids=suggestion.evidence_ids,
+                source_refs=suggestion.source_refs,
                 reviewed_by=suggestion.reviewed_by,
                 reviewed_at=suggestion.reviewed_at,
                 review_note=suggestion.review_note,
@@ -364,27 +404,27 @@ async def rebuild_fill_plan(
     return rebuilt
 
 
-async def render_annotations(
-    session: AsyncSession, plan: FillPlan
-) -> list[AnnotationAsset]:
+async def render_annotations(session: AsyncSession, plan: FillPlan) -> list[AnnotationAsset]:
     settings = get_settings()
     output_dir = settings.exports_dir / plan.id
     output_dir.mkdir(parents=True, exist_ok=True)
     targets = (
-        await session.execute(
-            select(FillTarget)
-            .options(selectinload(FillTarget.suggestions))
-            .where(FillTarget.plan_id == plan.id)
-            .order_by(FillTarget.created_at)
+        (
+            await session.execute(
+                select(FillTarget)
+                .options(selectinload(FillTarget.suggestions))
+                .where(FillTarget.plan_id == plan.id)
+                .order_by(FillTarget.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     slots = {
         slot.id: slot
         for slot in (
             await session.execute(
-                select(FillSlot).where(
-                    FillSlot.template_revision_id == plan.template_revision_id
-                )
+                select(FillSlot).where(FillSlot.template_revision_id == plan.template_revision_id)
             )
         ).scalars()
     }
@@ -454,7 +494,8 @@ async def render_annotations(
         for target, annotation in zip(page_targets, annotations, strict=True):
             x0, y0, x1, y1 = target.bbox_json
             box = (
-                max(0, x0 * scale_x), max(0, y0 * scale_y),
+                max(0, x0 * scale_x),
+                max(0, y0 * scale_y),
                 min(source_image.width, x1 * scale_x),
                 min(source_image.height, y1 * scale_y),
             )
@@ -467,9 +508,7 @@ async def render_annotations(
             color = (120, 116, 109) if rejected else (183, 67, 43)
             value = "已拒绝" if rejected else annotation["value"]
             if not value:
-                value = (
-                    "需人工签章" if target.kind == FillTargetKind.SIGNATURE else "待补充"
-                )
+                value = "需人工签章" if target.kind == FillTargetKind.SIGNATURE else "待补充"
             polygon = annotation.get("polygon")
             if polygon:
                 points = [(point[0] * scale_x, point[1] * scale_y) for point in polygon]
@@ -481,18 +520,24 @@ async def render_annotations(
         legend_left = source_image.width
         draw.line((legend_left, 0, legend_left, image.height), fill=(222, 213, 197), width=2)
         draw.text(
-            (legend_left + 20, 18), "填写建议 / 完整内容",
-            fill=(183, 67, 43), font=_annotation_font(),
+            (legend_left + 20, 18),
+            "填写建议 / 完整内容",
+            fill=(183, 67, 43),
+            font=_annotation_font(),
         )
         legend_top = 64
         for lines, height in legend_cards:
             draw.rectangle(
                 (legend_left + 12, legend_top, image.width - 12, legend_top + height),
-                fill=(255, 251, 240), outline=(222, 213, 197),
+                fill=(255, 251, 240),
+                outline=(222, 213, 197),
             )
             draw.multiline_text(
-                (legend_left + 24, legend_top + 10), "\n".join(lines),
-                fill=(36, 32, 26), font=_annotation_font(), spacing=8,
+                (legend_left + 24, legend_top + 10),
+                "\n".join(lines),
+                fill=(36, 32, 26),
+                font=_annotation_font(),
+                spacing=8,
             )
             legend_top += height + 12
         draw.text(
@@ -559,13 +604,16 @@ def _draw_value(draw, box, value: str, color) -> None:
     else:
         lines = _wrap_text(value, font, width)
         line_height = font.getbbox("国Ag")[3] + 2
-        lines = lines[:max(1, int(height // line_height))]
+        lines = lines[: max(1, int(height // line_height))]
         lines[-1] = _fit_text(lines[-1] + "...", font, int(width))
     text = "\n".join(lines)
     text_box = draw.multiline_textbbox((0, 0), text, font=font, spacing=2)
     draw.multiline_text(
         (box[0] + padding, box[1] + padding - text_box[1]),
-        text, font=font, fill=color, spacing=2,
+        text,
+        font=font,
+        fill=color,
+        spacing=2,
     )
 
 
@@ -584,11 +632,18 @@ def _draw_scanned_value(image: Image.Image, points, value: str, color) -> None:
     vx, vy = (bottom[0] - origin[0]) / height, (bottom[1] - origin[1]) / height
     # Rotate the value with the cell; paint only inside the original scan polygon.
     transform = (
-        ux, uy, ux * (left - origin[0]) + uy * (top - origin[1]),
-        vx, vy, vx * (left - origin[0]) + vy * (top - origin[1]),
+        ux,
+        uy,
+        ux * (left - origin[0]) + uy * (top - origin[1]),
+        vx,
+        vy,
+        vx * (left - origin[0]) + vy * (top - origin[1]),
     )
     rotated = layer.transform(
-        size, Image.Transform.AFFINE, transform, Image.Resampling.BICUBIC,
+        size,
+        Image.Transform.AFFINE,
+        transform,
+        Image.Resampling.BICUBIC,
         fillcolor=(255, 246, 222),
     )
     mask = Image.new("L", size, 0)
@@ -610,13 +665,13 @@ def _match_response_value(label: str, values: list[ResponseValue]) -> ResponseVa
     if not normalized:
         return None
     exact = [
-        value for value in values
-        if normalized in {value.key, re.sub(r"[\s:：]", "", value.label)}
+        value for value in values if normalized in {value.key, re.sub(r"[\s:：]", "", value.label)}
     ]
     if exact:
         return exact[0] if len(exact) == 1 else None
     candidates = [
-        value for value in values
+        value
+        for value in values
         if normalized in re.sub(r"\s+", "", value.label) or value.key in normalized
     ]
     return candidates[0] if len(candidates) == 1 else None

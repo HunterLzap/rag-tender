@@ -6,6 +6,8 @@ export const statusLabels: Record<string, string> = {
   proposed: '待确认', accepted: '已确认', edited: '已修改',
   missing_evidence: '待补充', rejected: '已拒绝',
   verified: '已核实', unreviewed: '待核实', expired: '已过期',
+  waiting_api: '待启用 AI', waiting_config: '待配置模型', ready: '已入库',
+  extracted: 'AI 已提取', drafting: '正在起草', drafted: '已起草',
 };
 
 export const roleLabels: Record<string, string> = {
@@ -24,9 +26,24 @@ export const stageLabels: Record<string, string> = {
 };
 
 export function statusColor(status: string): 'success' | 'warning' | 'error' | 'info' | 'default' {
-  if (['completed', 'met', 'accepted', 'edited', 'verified'].includes(status)) return 'success';
+  if (['completed', 'met', 'accepted', 'edited', 'verified', 'ready', 'drafted'].includes(status)) return 'success';
   if (['needs_review', 'proposed', 'missing_evidence', 'unreviewed', 'stale'].includes(status)) return 'warning';
   if (['failed', 'not_met', 'expired'].includes(status)) return 'error';
-  if (['queued', 'running'].includes(status)) return 'info';
+  if (['queued', 'running', 'drafting', 'extracted'].includes(status)) return 'info';
   return 'default';
 }
+
+export function documentStatus(document: { parse_status: string; ai_status: string }) {
+  return ['pending', 'queued', 'running', 'failed', 'canceled'].includes(document.parse_status)
+    ? document.parse_status : document.ai_status;
+}
+
+export const factLabels: Record<string, string> = {
+  company_name: '企业名称', unified_code: '统一社会信用代码', address: '地址',
+  contact: '联系人', phone: '联系电话', bank_name: '开户银行', bank_account: '银行账号',
+  certificate_name: '证书名称', certificate_type: '证书类型', level: '等级', scope: '适用范围',
+  valid_until: '有效期至', expiry_date: '有效期至', registered_capital: '注册资本',
+  revenue: '营业收入', project_name: '业绩名称', project_scope: '项目范围',
+  client_name: '客户名称', contract_amount: '合同金额', contract_date: '合同日期',
+  acceptance_date: '验收日期', material_type: '材料类型', model: '型号', manufacturer: '制造商',
+};

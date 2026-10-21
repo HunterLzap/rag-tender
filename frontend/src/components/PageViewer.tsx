@@ -4,7 +4,7 @@ import { api, type PageItem, type SourceSpan } from '../lib/api';
 
 interface Props {
   page: PageItem;
-  highlight?: SourceSpan | null;
+  highlight?: Pick<SourceSpan, 'page_id' | 'bbox_json' | 'quote'> & { table_cell_id?: string | null } | null;
   showLabel?: boolean;
 }
 

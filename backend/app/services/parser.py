@@ -8,6 +8,7 @@ from pathlib import Path
 import pdfplumber
 import pypdfium2 as pdfium
 from openpyxl import load_workbook
+from PIL import Image, ImageOps
 from pypdf import PdfReader
 
 from app.config import get_settings
@@ -80,7 +81,10 @@ def _render_pdf_page(pdf: pdfium.PdfDocument, page_index: int, output: Path) -> 
 
 
 def _parse_pdf(
-    path: Path, render_dir: Path | None, *, y_tolerance: float = 3,
+    path: Path,
+    render_dir: Path | None,
+    *,
+    y_tolerance: float = 3,
 ) -> ParsedDocument:
     pages: list[ParsedPage] = []
     pdfium_doc = pdfium.PdfDocument(path)
@@ -187,22 +191,30 @@ def _parse_pdf(
                         pdfium_doc, index, render_dir / f"page-{index + 1:04d}.png"
                     )
                 flags = []
-                if render_path and raw_page.images and not any(
-                    block.kind == "table" for block in blocks
+                if (
+                    render_path
+                    and raw_page.images
+                    and not any(block.kind == "table" for block in blocks)
                 ):
                     scan_tables = detect_scanned_tables(
-                        render_path, float(raw_page.width), float(raw_page.height),
+                        render_path,
+                        float(raw_page.width),
+                        float(raw_page.height),
                     )
                     for table in scan_tables:
-                        blocks.append(ParsedBlock(
-                            kind=table.kind, text=table.text, bbox=table.bbox,
-                            order=len(blocks), cells=table.cells, metadata=table.metadata,
-                        ))
+                        blocks.append(
+                            ParsedBlock(
+                                kind=table.kind,
+                                text=table.text,
+                                bbox=table.bbox,
+                                order=len(blocks),
+                                cells=table.cells,
+                                metadata=table.metadata,
+                            )
+                        )
                     if scan_tables:
                         flags.append("scan_table_geometry")
-                mode = (
-                    "needs_vision" if len(text) < TEXT_MIN_CHARS and raw_page.images else "text"
-                )
+                mode = "needs_vision" if len(text) < TEXT_MIN_CHARS and raw_page.images else "text"
                 if mode == "needs_vision":
                     flags.append("no_text_layer")
                 pages.append(
@@ -247,16 +259,25 @@ def _parse_office(path: Path, render_dir: Path | None) -> ParsedDocument:
     label = None
     for page in parsed.pages:
         label = labels.get(page.page_index, label)
-        pages.append(ParsedPage(
-            page_index=page.page_index, width=page.width, height=page.height,
-            text=page.text, blocks=page.blocks, printed_label=label,
-            parse_mode=page.parse_mode, quality_flags=page.quality_flags,
-            render_path=page.render_path,
-            native_locator={
-                "kind": path.suffix[1:].lower(), "page_index": page.page_index,
-                "rendered_as": "pdf", **({"sheet": label} if label else {}),
-            },
-        ))
+        pages.append(
+            ParsedPage(
+                page_index=page.page_index,
+                width=page.width,
+                height=page.height,
+                text=page.text,
+                blocks=page.blocks,
+                printed_label=label,
+                parse_mode=page.parse_mode,
+                quality_flags=page.quality_flags,
+                render_path=page.render_path,
+                native_locator={
+                    "kind": path.suffix[1:].lower(),
+                    "page_index": page.page_index,
+                    "rendered_as": "pdf",
+                    **({"sheet": label} if label else {}),
+                },
+            )
+        )
     return ParsedDocument(
         pages=tuple(pages),
         metadata={**parsed.metadata, "preview_engine": "libreoffice", "sheets": sheets},
@@ -308,6 +329,30 @@ def parse_document(path: Path, render_root: Path | None = None) -> ParsedDocumen
         return _parse_office(path, render_dir)
     if suffix == ".csv":
         return _parse_csv(path)
+    if suffix in {".png", ".jpg", ".jpeg"}:
+        directory = render_dir or get_settings().rendered_dir / path.stem
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / "page-0001.png"
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.save(target)
+        tables = detect_scanned_tables(target, image.width, image.height)
+        return ParsedDocument(
+            pages=(
+                ParsedPage(
+                    page_index=0,
+                    width=image.width,
+                    height=image.height,
+                    text="",
+                    blocks=tuple(tables),
+                    parse_mode="needs_vision",
+                    render_path=target,
+                    quality_flags=("no_text_layer", *(("scan_table_geometry",) if tables else ())),
+                    native_locator={"kind": "image"},
+                ),
+            ),
+            metadata={"page_count": 1},
+        )
     raise DocumentNeedsVision(f"暂不支持直接解析 {suffix or '未知格式'} 文件")
 
 

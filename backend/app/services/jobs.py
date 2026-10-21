@@ -22,9 +22,12 @@ class JobCanceled(RuntimeError):
 
 
 async def check_canceled(session: AsyncSession, job_id: str | None) -> None:
-    if job_id and (
-        await session.execute(select(Job.cancel_requested).where(Job.id == job_id))
-    ).scalar_one_or_none():
+    if (
+        job_id
+        and (
+            await session.execute(select(Job.cancel_requested).where(Job.id == job_id))
+        ).scalar_one_or_none()
+    ):
         raise JobCanceled("任务已取消")
 
 
@@ -54,14 +57,18 @@ async def enqueue(session: AsyncSession, kind: str, payload: dict[str, Any]) -> 
         payload={key: value for key, value in payload.items() if key != "_dedupe_key"},
         dedupe_key=dedupe_key,
         # Model-backed work must not be repeated automatically after a partial run.
-        max_attempts=1 if kind == "analyze_project" else 3,
+        max_attempts=3 if kind == "parse_document" else 1,
     )
-    if kind == "parse_document":
+    if kind in {"parse_document", "process_document"}:
         document = await session.get(
             __import__("app.models", fromlist=["Document"]).Document, payload["document_id"]
         )
         if document is not None:
-            job.payload = {**job.payload, "project_id": document.project_id}
+            job.payload = {
+                **job.payload,
+                "project_id": document.project_id,
+                "organization_id": document.organization_id,
+            }
     elif kind == "analyze_project":
         run = await session.get(
             __import__("app.models", fromlist=["AnalysisRun"]).AnalysisRun,
@@ -69,17 +76,32 @@ async def enqueue(session: AsyncSession, kind: str, payload: dict[str, Any]) -> 
         )
         if run is not None:
             job.payload = {**job.payload, "project_id": run.project_id}
+    elif kind == "draft_fill_plan":
+        from app.models import FillPlan
+
+        plan = await session.get(FillPlan, payload["plan_id"])
+        run = await session.get(AnalysisRun, plan.run_id)
+        job.payload = {**job.payload, "project_id": run.project_id}
     session.add(job)
     await session.flush()
     return job
 
 
 async def claim_job(session: AsyncSession, worker_id: str, lease_seconds: int) -> Job | None:
+    from app.config import get_settings
+
     now = utcnow()
+    allowed = (
+        []
+        if get_settings().live_model_calls
+        else [
+            Job.kind.notin_(["process_document", "analyze_project", "draft_fill_plan"]),
+        ]
+    )
     candidate = (
         await session.execute(
             select(Job.id)
-            .where(Job.status == JobStatus.QUEUED, Job.available_at <= now)
+            .where(Job.status == JobStatus.QUEUED, Job.available_at <= now, *allowed)
             .order_by(Job.available_at, Job.created_at)
             .limit(1)
         )
@@ -168,9 +190,24 @@ async def fail_exhausted_jobs(session: AsyncSession) -> int:
             document = await session.get(Document, payload.get("document_id"))
             if document:
                 document.metadata_json = {
-                    **(document.metadata_json or {}), "parse_status": "failed",
+                    **(document.metadata_json or {}),
+                    "parse_status": "failed",
                     "parse_error": "解析任务超时，请手动重试",
                 }
+        elif kind == "process_document":
+            document = await session.get(Document, payload.get("document_id"))
+            if document:
+                document.metadata_json = {
+                    **document.metadata_json,
+                    "ai_status": "failed",
+                    "ai_error": "AI 入库任务超时，请检查模型设置后重试",
+                }
+        elif kind == "draft_fill_plan":
+            from app.models import FillPlan
+
+            plan = await session.get(FillPlan, payload.get("plan_id"))
+            if plan:
+                plan.status = "failed"
     await session.commit()
     return len(failed)
 
@@ -195,9 +232,24 @@ async def request_cancel(session: AsyncSession, job_id: str) -> Job:
             document = await session.get(Document, job.payload.get("document_id"))
             if document:
                 document.metadata_json = {
-                    **(document.metadata_json or {}), "parse_status": "canceled",
+                    **(document.metadata_json or {}),
+                    "parse_status": "canceled",
                     "parse_error": "解析任务已取消",
                 }
+        elif job.kind == "process_document":
+            document = await session.get(Document, job.payload.get("document_id"))
+            if document:
+                document.metadata_json = {
+                    **document.metadata_json,
+                    "ai_status": "canceled",
+                    "ai_error": "任务已取消",
+                }
+        elif job.kind == "draft_fill_plan":
+            from app.models import FillPlan
+
+            plan = await session.get(FillPlan, job.payload.get("plan_id"))
+            if plan:
+                plan.status = "canceled"
     await session.commit()
     return job
 
@@ -210,9 +262,7 @@ async def mark_progress(
     stage: str,
 ) -> None:
     await session.execute(
-        update(Job)
-        .where(Job.id == job_id)
-        .values(progress=max(0, min(100, progress)), stage=stage)
+        update(Job).where(Job.id == job_id).values(progress=max(0, min(100, progress)), stage=stage)
     )
     await session.commit()
 
@@ -268,13 +318,30 @@ async def _process_one(session: AsyncSession, job: Job) -> None:
                     "parse_status": "canceled" if canceled else "queued" if retry else "failed",
                     "parse_error": f"{type(exc).__name__}: {exc}"[:2000],
                 }
+        elif fresh.kind == "process_document":
+            document = await session.get(Document, fresh.payload.get("document_id"))
+            if document:
+                document.metadata_json = {
+                    **document.metadata_json,
+                    "ai_status": "canceled" if canceled else "failed",
+                    "ai_error": f"{type(exc).__name__}: {exc}"[:2000],
+                }
+        elif fresh.kind == "draft_fill_plan":
+            from app.models import FillPlan
+
+            plan = await session.get(FillPlan, fresh.payload.get("plan_id"))
+            if plan:
+                plan.status = "canceled" if canceled else "failed"
         await session.execute(
             update(Job)
             .where(Job.id == job_id)
             .values(
                 status=(
-                    JobStatus.CANCELED if canceled else
-                    JobStatus.QUEUED if retry else JobStatus.FAILED
+                    JobStatus.CANCELED
+                    if canceled
+                    else JobStatus.QUEUED
+                    if retry
+                    else JobStatus.FAILED
                 ),
                 stage="已取消" if canceled else "等待重试" if retry else "失败",
                 error=f"{type(exc).__name__}: {exc}"[:4000],
@@ -306,4 +373,12 @@ async def worker_loop(stop_event: asyncio.Event, poll_seconds: float, lease_seco
                     return
                 continue
             await _process_one(session, job)
+            if job.kind == "analyze_project" and job.status == JobStatus.COMPLETED:
+                from app.models import Project
+                from app.services.pipeline import schedule_analysis
+
+                project = await session.get(Project, job.payload.get("project_id"))
+                if project and project.auto_analyze and project.status == "active":
+                    await schedule_analysis(session, project, automatic=True)
+                    await session.commit()
     logger.info("worker stopped: %s", worker_id)

@@ -18,6 +18,8 @@ export function apiError(error: unknown, fallback = '操作失败，请重试'):
 export interface Project {
   id: string;
   name: string;
+  organization_id: string | null;
+  auto_analyze: boolean;
   bidder_name: string | null;
   purchaser: string | null;
   tender_no: string | null;
@@ -44,7 +46,8 @@ export interface Bid {
 
 export interface DocumentItem {
   id: string;
-  project_id: string;
+  project_id: string | null;
+  organization_id: string | null;
   role: string;
   filename: string;
   content_type: string | null;
@@ -55,6 +58,9 @@ export interface DocumentItem {
   current_page_count: number;
   parse_status: string;
   parse_error: string | null;
+  ai_status: string;
+  ai_error: string | null;
+  evidence_count: number;
   supersedes_id: string | null;
   created_at: string;
 }
@@ -135,6 +141,11 @@ export interface FillSuggestion {
   confidence: number | null;
   status: string;
   evidence_ids: string[];
+  source_refs: Array<{
+    source_span_id?: string; document_id?: string; filename?: string;
+    page_id?: string; page_index?: number; quote?: string; bbox_json?: number[];
+    response_value_id?: string; label?: string; value?: string;
+  }>;
   reviewed_by: string | null;
   reviewed_at: string | null;
   review_note: string | null;
@@ -267,6 +278,7 @@ export interface AnalysisReport {
 export interface Evidence {
   id: string;
   project_id: string | null;
+  organization_id: string | null;
   kind: string;
   title: string;
   holder: string | null;
@@ -279,14 +291,35 @@ export interface Evidence {
   review_status: string;
   payload: Record<string, unknown>;
   source_span: SourceSpan | null;
-  facts: Array<{
-    id: string;
-    fact_key: string;
-    value_text: string | null;
-    value_number: string | null;
-    value_date: string | null;
-    unit: string | null;
-  }>;
+  facts: EvidenceFact[];
+}
+
+export interface EvidenceFact {
+  id: string;
+  fact_key: string;
+  value_text: string | null;
+  value_number: string | null;
+  value_date: string | null;
+  unit: string | null;
+  review_status: string;
+  source_span_id: string | null;
+  source_span: SourceSpan | null;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  unified_code: string | null;
+  metadata_json: Record<string, string>;
+  document_count: number;
+  evidence_count: number;
+}
+
+export interface ModelConfig {
+  id: string; name: string; base_url: string; text_model: string;
+  vision_model: string | null; api_key_masked: string; is_active: boolean;
+  embedding_model: string | null; embedding_base_url: string | null;
+  embedding_api_key_masked: string; embedding_dimensions: number | null;
 }
 
 export async function uploadDocument(

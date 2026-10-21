@@ -5,6 +5,7 @@ import ProjectPage from './pages/ProjectPage';
 import WorkbenchPage from './pages/WorkbenchPage';
 import EvidencePage from './pages/EvidencePage';
 import SettingsPage from './pages/SettingsPage';
+import LibraryPage from './pages/LibraryPage';
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/runs/:runId" element={<WorkbenchPage />} />
         <Route path="/projects/:projectId/evidence" element={<EvidencePage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/library" element={<LibraryPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
