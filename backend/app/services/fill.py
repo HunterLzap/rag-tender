@@ -1,8 +1,8 @@
 import re
-from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,20 +25,20 @@ from app.models import (
 )
 
 
-@dataclass(frozen=True)
-class SlotCandidate:
-    page: Page
-    block: Block | None
-    label: str
-    bbox: list[float]
-    kind: FillTargetKind
-
-
 async def detect_fill_slots(
     session: AsyncSession, document: Document
 ) -> list[FillSlot]:
     if not document.current_revision_id:
         return []
+    existing = (
+        await session.execute(
+            select(FillSlot).where(
+                FillSlot.template_revision_id == document.current_revision_id
+            )
+        )
+    ).scalars().all()
+    if existing:
+        return list(existing)
     pages = (
         await session.execute(
             select(Page)
@@ -67,32 +67,42 @@ async def detect_fill_slots(
                 continue
             max_row = max(cell.row_index for cell in cells)
             max_col = max(cell.col_index for cell in cells)
-            occupied = {(cell.row_index, cell.col_index) for cell in cells}
             header = [""] * (max_col + 1)
             for cell in cells:
                 if cell.row_index == 0:
-                    header[cell.col_index] = cell.text.strip()
+                    for col in range(cell.col_index, cell.col_index + cell.col_span):
+                        if col < len(header):
+                            header[col] = cell.text.strip()
             header_labels = [value for value in header if value]
-            if len(header_labels) < 2:
-                continue
             for cell in cells:
-                if cell.row_index == 0:
+                if not _is_placeholder(cell.text):
                     continue
-                label = header[cell.col_index] if cell.col_index < len(header) else "待填写"
-                if label and cell.text.strip() and cell.text.strip() != label:
-                    # This is a populated row, not an empty input slot.
-                    continue
+                label = header[cell.col_index] or "待填写"
+                left = next(
+                    (
+                        other for other in reversed(cells)
+                        if other.row_index == cell.row_index
+                        and other.col_index + other.col_span == cell.col_index
+                        and not _is_placeholder(other.text)
+                    ),
+                    None,
+                )
+                if left and (
+                    cell.row_index == 0 or max_col == 1 or left.text.rstrip().endswith((":", "："))
+                ):
+                    label = left.text.strip().rstrip(":：")
                 slot = FillSlot(
                     template_revision_id=document.current_revision_id,
                     page_id=page.id,
                     block_id=block.id,
+                    table_cell_id=cell.id,
                     kind=FillTargetKind.TABLE_CELL,
                     label=label,
                     locator={
                         "kind": "table_cell",
                         "row": cell.row_index,
                         "col": cell.col_index,
-                        "max_row": max(max_row, 2),
+                        "max_row": max_row,
                         "max_col": max_col,
                         **cell.native_locator,
                     },
@@ -101,111 +111,104 @@ async def detect_fill_slots(
                 )
                 session.add(slot)
                 slots.append(slot)
-            if max_row == 0:
-                synthetic_rows = 2
-                for row in range(1, synthetic_rows + 1):
-                    for col in range(max_col + 1):
-                        label = header[col] if col < len(header) and header[col] else "待填写"
-                        slot = FillSlot(
-                            template_revision_id=document.current_revision_id,
-                            page_id=page.id,
-                            block_id=block.id,
-                            kind=FillTargetKind.TABLE_CELL,
-                            label=label,
-                            locator={
-                                "kind": "table_cell",
-                                "row": row,
-                                "col": col,
-                                "max_row": synthetic_rows,
-                                "max_col": max_col,
-                                "synthetic": True,
-                            },
-                            bbox_json=_synthetic_row_bbox(block, synthetic_rows, row, col, max_col),
-                            value_schema={"type": "string"},
-                        )
-                        session.add(slot)
-                        slots.append(slot)
-            for row in range(1, max_row + 1):
-                for col in range(max_col + 1):
-                    if (row, col) in occupied:
-                        continue
-                    label = header[col] if col < len(header) and header[col] else "待填写"
+            if max_row == 0 and len(header_labels) >= 2 and all(
+                not _is_placeholder(cell.text) for cell in cells
+            ):
+                # The header is a reference only; no writable row was located.
+                for cell in cells:
                     slot = FillSlot(
                         template_revision_id=document.current_revision_id,
                         page_id=page.id,
                         block_id=block.id,
                         kind=FillTargetKind.TABLE_CELL,
-                        label=label,
+                        table_cell_id=cell.id,
+                        label=cell.text.strip(),
                         locator={
                             "kind": "table_cell",
-                            "row": row,
-                            "col": col,
-                            "max_row": max_row,
-                            "max_col": max_col,
+                            "row": cell.row_index,
+                            "col": cell.col_index,
+                            "reference_only": True,
+                            "coordinate_quality": "header_only",
                         },
-                        bbox_json=block_bbox_for_empty_cell(block, cells, row, col),
+                        bbox_json=[cell.x0, cell.y0, cell.x1, cell.y1],
                         value_schema={"type": "string"},
                     )
                     session.add(slot)
                     slots.append(slot)
         for block in blocks:
-            if block.kind != "line":
+            if block.kind not in {"line", "paragraph"}:
                 continue
-            match = re.search(r"([^:：]{2,30})[:：]\s*[_—\-]{2,}", block.text)
-            if not match:
-                continue
-            slot = FillSlot(
-                template_revision_id=document.current_revision_id,
-                page_id=page.id,
-                block_id=block.id,
-                kind=FillTargetKind.TEXT_BOX,
-                label=match.group(1).strip(),
-                locator={"kind": "text_box", "block_id": block.id},
-                bbox_json=[block.x0, block.y0, block.x1, block.y1],
-                value_schema={"type": "string"},
-            )
-            session.add(slot)
-            slots.append(slot)
+            for label, kind, start, end in _text_fields(block.text):
+                slot = FillSlot(
+                    template_revision_id=document.current_revision_id,
+                    page_id=page.id,
+                    block_id=block.id,
+                    kind=kind,
+                    label=label,
+                    locator={
+                        "kind": kind.value,
+                        "block_id": block.id,
+                        "char_start": start,
+                        "char_end": end,
+                        "coordinate_quality": "text_span",
+                    },
+                    bbox_json=_text_field_bbox(block, start, end),
+                    value_schema={"type": "string"},
+                )
+                session.add(slot)
+                slots.append(slot)
     await session.flush()
     return slots
 
 
-def _synthetic_row_bbox(
-    block: Block,
-    rows: int,
-    row: int,
-    col: int,
-    max_col: int,
-) -> list[float]:
-    row_height = 22.0
-    col_width = (block.x1 - block.x0) / (max_col + 1)
-    top = block.y1 + (row - 1) * row_height
-    return [
-        block.x0 + col * col_width,
-        top,
-        block.x0 + (col + 1) * col_width,
-        top + row_height,
-    ]
+def _is_placeholder(text: str) -> bool:
+    return re.fullmatch(r"[\s_＿—－\-()（）]*", text) is not None
 
 
-def block_bbox_for_empty_cell(
-    block: Block,
-    cells: list[TableCell],
-    row: int,
-    col: int,
-) -> list[float]:
-    max_col = max(cell.col_index for cell in cells)
-    if max_col < 0:
-        return [block.x0, block.y0, block.x1, block.y1]
-    width = (block.x1 - block.x0) / (max_col + 1)
-    max_row = max(cell.row_index for cell in cells)
-    height = (block.y1 - block.y0) / max(max_row + 1, 1)
-    return [
-        block.x0 + col * width,
-        block.y0 + row * height,
-        block.x0 + (col + 1) * width,
-        block.y0 + (row + 1) * height,
-    ]
+def _text_fields(text: str):
+    patterns = (
+        r"(?P<label>[^:：_＿—－()（）]{2,30}?)[:：]\s*"
+        r"(?P<blank>[_＿—－\-]{2,}|[（(]\s*[)）])",
+        r"(?P<label>[^:：_＿—－()（）]{2,30}?)(?P<blank>[（(]\s+[)）])",
+    )
+    occupied: list[tuple[int, int]] = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            if any(match.start() < end and match.end() > start for start, end in occupied):
+                continue
+            occupied.append(match.span())
+            label = match.group("label").strip()
+            kind = FillTargetKind.DATE if "日期" in label else FillTargetKind.TEXT_BOX
+            if any(word in label for word in ("盖章", "签字", "签名", "签章")):
+                kind = FillTargetKind.SIGNATURE
+            yield label, kind, *match.span("blank")
+    for match in re.finditer(r"(?P<box>[□☐])\s*(?P<label>[^\s□☐]{1,30})", text):
+        yield match.group("label"), FillTargetKind.CHECKBOX, *match.span("box")
+    for match in re.finditer(r"[（(](?P<label>[^()（）]{0,15}(?:盖章|签字|签名|签章))[)）]", text):
+        if not any(match.start() < end and match.end() > start for start, end in occupied):
+            yield match.group("label"), FillTargetKind.SIGNATURE, *match.span()
+
+
+def _text_field_bbox(block: Block, start: int, end: int) -> list[float]:
+    words = (block.metadata_json or {}).get("word_spans", [])
+    boxes = []
+    for word in words:
+        left, right = max(start, word["start"]), min(end, word["end"])
+        if left >= right:
+            continue
+        x0, y0, x1, y1 = word["bbox"]
+        width = (x1 - x0) / (word["end"] - word["start"])
+        boxes.append(
+            [x0 + (left - word["start"]) * width, y0,
+             x0 + (right - word["start"]) * width, y1]
+        )
+    if boxes:
+        return [
+            min(box[0] for box in boxes), min(box[1] for box in boxes),
+            max(box[2] for box in boxes), max(box[3] for box in boxes),
+        ]
+    width = (block.x1 - block.x0) / max(len(block.text), 1)
+    return [block.x0 + start * width, block.y0, block.x0 + end * width, block.y1]
 
 
 async def create_fill_plan(
@@ -214,15 +217,17 @@ async def create_fill_plan(
     run_id: str,
     project_id: str,
     template_document: Document,
+    plan: FillPlan | None = None,
 ) -> FillPlan:
-    plan = FillPlan(
-        run_id=run_id,
-        document_id=template_document.id,
-        template_revision_id=template_document.current_revision_id,
-        status="draft",
-    )
-    session.add(plan)
-    await session.flush()
+    if plan is None:
+        plan = FillPlan(
+            run_id=run_id,
+            document_id=template_document.id,
+            template_revision_id=template_document.current_revision_id,
+            status="draft",
+        )
+        session.add(plan)
+        await session.flush()
 
     slots = (
         await session.execute(
@@ -269,17 +274,22 @@ async def create_fill_plan(
                 )
             )
         else:
-            if related:
-                session.add(
-                    FillSuggestion(
-                        target_id=target.id,
-                        value=None,
-                        rationale=f"对应要求：{related.title}；尚无可填写值",
-                        confidence=0.4,
-                        status=SuggestionStatus.MISSING_EVIDENCE,
-                        evidence_ids=[],
-                    )
+            rationale = (
+                f"对应要求：{related.title}；请补充填写值及依据"
+                if related else f"请补充「{slot.label}」的填写值及依据"
+            )
+            if slot.kind == FillTargetKind.SIGNATURE:
+                rationale = "此处需人工签字或盖章，确认实际办理后再接受"
+            session.add(
+                FillSuggestion(
+                    target_id=target.id,
+                    value=None,
+                    rationale=rationale,
+                    confidence=None,
+                    status=SuggestionStatus.MISSING_EVIDENCE,
+                    evidence_ids=[],
                 )
+            )
     await session.flush()
     return plan
 
@@ -302,22 +312,22 @@ async def rebuild_fill_plan(
         for target in targets
         if target.fill_slot_id and target.suggestions
         and target.suggestions[0].status
-        in {SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED}
+        in {SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED, SuggestionStatus.REJECTED}
     }
 
-    for target in targets:
-        for suggestion in target.suggestions:
-            await session.delete(suggestion)
-    await session.flush()
     for target in targets:
         await session.delete(target)
     await session.flush()
 
+    template_document = await session.get(Document, plan.document_id)
+    plan.template_revision_id = template_document.current_revision_id
+    await detect_fill_slots(session, template_document)
     rebuilt = await create_fill_plan(
         session,
         run_id=plan.run_id,
         project_id=project_id,
-        template_document=await session.get(Document, plan.document_id),
+        template_document=template_document,
+        plan=plan,
     )
     refreshed = (
         await session.execute(
@@ -331,7 +341,7 @@ async def rebuild_fill_plan(
         if suggestion is None:
             continue
         target.suggestions.clear()
-        session.add(
+        target.suggestions.append(
             FillSuggestion(
                 target_id=target.id,
                 value=suggestion.value,
@@ -362,6 +372,22 @@ async def render_annotations(
             .order_by(FillTarget.created_at)
         )
     ).scalars().all()
+    slots = {
+        slot.id: slot
+        for slot in (
+            await session.execute(
+                select(FillSlot).where(
+                    FillSlot.template_revision_id == plan.template_revision_id
+                )
+            )
+        ).scalars()
+    }
+    existing_assets = {
+        asset.page_id: asset
+        for asset in (
+            await session.execute(select(AnnotationAsset).where(AnnotationAsset.plan_id == plan.id))
+        ).scalars()
+    }
     by_page: dict[str, list[FillTarget]] = {}
     for target in targets:
         by_page.setdefault(target.page_id, []).append(target)
@@ -373,55 +399,89 @@ async def render_annotations(
         source = Path(page.render_path)
         if not source.exists():
             continue
-        source_image = Image.open(source).convert("RGB")
+        with Image.open(source) as original:
+            source_image = original.convert("RGB")
+        scale_x = source_image.width / page.width
+        scale_y = source_image.height / page.height
+        legend_width = 420
         footer_height = 56
-        image = Image.new(
-            "RGB", (source_image.width, source_image.height + footer_height), (255, 253, 247)
-        )
-        image.paste(source_image, (0, 0))
-        draw = ImageDraw.Draw(image)
-        scale_x = image.width / page.width
-        scale_y = image.height / page.height
         annotations = []
         for index, target in enumerate(page_targets, start=1):
-            x0, y0, x1, y1 = target.bbox_json
-            box = (x0 * scale_x, y0 * scale_y, x1 * scale_x, y1 * scale_y)
-            draw.rectangle(box, outline=(210, 50, 30), width=4)
-            draw.ellipse((box[0] - 4, box[1] - 20, box[0] + 26, box[1] + 10), fill=(210, 50, 30))
-            draw.text(
-                (box[0] + 5, box[1] - 18),
-                str(index),
-                fill="white",
-                font=_annotation_font(),
-            )
             suggestion = target.suggestions[0] if target.suggestions else None
+            slot = slots.get(target.fill_slot_id)
             annotation = {
                 "index": index,
                 "target_id": target.id,
                 "label": target.label,
                 "value": suggestion.value if suggestion else None,
+                "status": suggestion.status.value if suggestion else "missing_evidence",
                 "bbox": target.bbox_json,
+                "reference_only": bool(slot and slot.locator.get("reference_only")),
+                "coordinate_quality": (
+                    slot.locator.get("coordinate_quality", "native") if slot else "native"
+                ),
             }
             annotations.append(annotation)
-        per_column = max(1, (image.height - 40) // max(len(annotations), 1))
-        for index, annotation in enumerate(annotations):
-            legend_top = 20 + index * per_column
-            text = (
-                f"{annotation['index']}. {annotation['label']}: "
-                f"{annotation['value'] or '待填写'}"
+        legend_cards = []
+        legend_height = 64
+        for annotation in annotations:
+            value = annotation["value"] or "待补充"
+            if annotation["status"] == SuggestionStatus.REJECTED.value:
+                value = "已拒绝"
+            note = "\n仅识别到表头，需确认实际填写行" if annotation["reference_only"] else ""
+            text = f"{annotation['index']}. {annotation['label']}\n{value}{note}"
+            lines = _wrap_text(text, _annotation_font(), legend_width - 48)
+            height = len(lines) * 28 + 24
+            legend_cards.append((lines, height))
+            legend_height += height + 12
+        image = Image.new(
+            "RGB",
+            (
+                source_image.width + legend_width,
+                max(source_image.height, legend_height) + footer_height,
+            ),
+            (255, 253, 247),
+        )
+        image.paste(source_image, (0, 0))
+        draw = ImageDraw.Draw(image)
+        for target, annotation in zip(page_targets, annotations, strict=True):
+            x0, y0, x1, y1 = target.bbox_json
+            box = (
+                max(0, x0 * scale_x), max(0, y0 * scale_y),
+                min(source_image.width, x1 * scale_x),
+                min(source_image.height, y1 * scale_y),
             )
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            if annotation["reference_only"]:
+                draw.rectangle(box, outline=(158, 113, 35), width=2)
+                continue
+            rejected = annotation["status"] == SuggestionStatus.REJECTED.value
+            color = (120, 116, 109) if rejected else (183, 67, 43)
+            value = "已拒绝" if rejected else annotation["value"]
+            if not value:
+                value = (
+                    "需人工签章" if target.kind == FillTargetKind.SIGNATURE else "待补充"
+                )
+            draw.rectangle(box, fill=(255, 246, 222), outline=color, width=2)
+            _draw_value(draw, box, value, color)
+        legend_left = source_image.width
+        draw.line((legend_left, 0, legend_left, image.height), fill=(222, 213, 197), width=2)
+        draw.text(
+            (legend_left + 20, 18), "填写建议 / 完整内容",
+            fill=(183, 67, 43), font=_annotation_font(),
+        )
+        legend_top = 64
+        for lines, height in legend_cards:
             draw.rectangle(
-                (image.width - 430, legend_top, image.width - 20, legend_top + 42),
-                fill=(255, 253, 247),
-                outline=(183, 67, 43),
+                (legend_left + 12, legend_top, image.width - 12, legend_top + height),
+                fill=(255, 251, 240), outline=(222, 213, 197),
             )
-            fitted = _fit_text(text, _annotation_font(), 390)
-            draw.text(
-                (image.width - 415, legend_top + 11),
-                fitted,
-                fill=(36, 32, 26),
-                font=_annotation_font(),
+            draw.multiline_text(
+                (legend_left + 24, legend_top + 10), "\n".join(lines),
+                fill=(36, 32, 26), font=_annotation_font(), spacing=8,
             )
+            legend_top += height + 12
         draw.text(
             (20, image.height - 38),
             f"投标响应工作台 · 第 {page.page_index + 1} 页 · {len(annotations)} 个填写位置",
@@ -430,26 +490,23 @@ async def render_annotations(
         )
         target_path = output_dir / f"page-{page.page_index + 1:04d}-annotated.png"
         image.save(target_path)
-        asset = AnnotationAsset(
-            plan_id=plan.id,
-            page_id=page.id,
-            kind="page",
-            path=str(target_path),
-            width=image.width,
-            height=image.height,
-            annotations=annotations,
-        )
+        asset = existing_assets.pop(page_id, None)
+        if asset is None:
+            asset = AnnotationAsset(plan_id=plan.id, page_id=page.id, kind="page")
+        asset.path = str(target_path)
+        asset.width = image.width
+        asset.height = image.height
+        asset.annotations = annotations
         session.add(asset)
         assets.append(asset)
+    for asset in existing_assets.values():
+        await session.delete(asset)
     await session.flush()
     return assets
 
 
-def _annotation_font():
-    from pathlib import Path
-
-    from PIL import ImageFont
-
+@lru_cache(maxsize=24)
+def _annotation_font(size: int = 20):
     for candidate in (
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/System/Library/Fonts/STHeiti Medium.ttc",
@@ -457,8 +514,46 @@ def _annotation_font():
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     ):
         if Path(candidate).exists():
-            return ImageFont.truetype(candidate, 20)
-    return ImageFont.load_default()
+            return ImageFont.truetype(candidate, size)
+    return ImageFont.load_default(size=size)
+
+
+def _wrap_text(text: str, font, max_width: float) -> list[str]:
+    lines = []
+    for paragraph in text.split("\n"):
+        current = ""
+        for char in paragraph:
+            if current and font.getlength(current + char) > max_width:
+                lines.append(current)
+                current = ""
+            current += char
+        lines.append(current)
+    return lines
+
+
+def _draw_value(draw, box, value: str, color) -> None:
+    padding = 4
+    width, height = box[2] - box[0] - padding * 2, box[3] - box[1] - padding * 2
+    if width < 6 or height < 6:
+        return
+    font = _annotation_font(10)
+    for size in range(min(24, int(height)), 9, -1):
+        font = _annotation_font(size)
+        lines = _wrap_text(value, font, width)
+        text_box = draw.multiline_textbbox((0, 0), "\n".join(lines), font=font, spacing=2)
+        if text_box[3] - text_box[1] <= height:
+            break
+    else:
+        lines = _wrap_text(value, font, width)
+        line_height = font.getbbox("国Ag")[3] + 2
+        lines = lines[:max(1, int(height // line_height))]
+        lines[-1] = _fit_text(lines[-1] + "...", font, int(width))
+    text = "\n".join(lines)
+    text_box = draw.multiline_textbbox((0, 0), text, font=font, spacing=2)
+    draw.multiline_text(
+        (box[0] + padding, box[1] + padding - text_box[1]),
+        text, font=font, fill=color, spacing=2,
+    )
 
 
 def _fit_text(text: str, font, max_width: int) -> str:
@@ -471,11 +566,17 @@ def _fit_text(text: str, font, max_width: int) -> str:
 
 
 def _match_response_value(label: str, values: list[ResponseValue]) -> ResponseValue | None:
-    normalized = re.sub(r"\s+", "", label)
+    normalized = re.sub(r"[\s:：]", "", label)
+    if not normalized:
+        return None
     for value in values:
-        if value.key in normalized or normalized in value.label:
+        if normalized in {value.key, re.sub(r"[\s:：]", "", value.label)}:
             return value
-    return None
+    candidates = [
+        value for value in values
+        if normalized in re.sub(r"\s+", "", value.label) or value.key in normalized
+    ]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _match_requirement(label: str, requirements: list[Requirement]) -> Requirement | None:

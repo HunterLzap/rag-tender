@@ -712,7 +712,7 @@ class Job(Base, TimestampMixin):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     stage: Mapped[str] = mapped_column(String(300), default="等待处理")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=1)
     dedupe_key: Mapped[str | None] = mapped_column(String(200), index=True)
     lease_owner: Mapped[str | None] = mapped_column(String(120))
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

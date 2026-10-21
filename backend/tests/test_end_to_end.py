@@ -1,15 +1,18 @@
 import asyncio
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services import model_gateway
+from app.services.extraction import _block_batches
 from app.services.jobs import worker_loop
 
 SAMPLE = Path(__file__).parents[2] / "samples" / "控制柜配电柜变频柜采购招标公告_样本.pdf"
 
 
-def test_mock_model_pipeline_and_fill_review(monkeypatch):
+def test_mock_model_pipeline_and_fill_review(monkeypatch, empty_table_pdf):
     from app.services import extraction
     from app.services.model_eval import SemanticAssessment
 
@@ -31,13 +34,15 @@ def test_mock_model_pipeline_and_fill_review(monkeypatch):
             payload = json.loads(match.group(0))
             candidate = next(
                 (block for block in payload["blocks"] if "设备名称" in block["text"]),
-                payload["blocks"][0],
+                None,
             )
+            if candidate is None:
+                return extraction.ExtractedRequirements()
             block_id = candidate["block_id"]
             return extraction.ExtractedRequirements(
                 requirements=[
                     extraction.ExtractedRequirement(
-                        title="设备名称响应",
+                        title="Equipment 响应",
                         statement="须填写设备名称",
                         category="submission",
                         evaluation_stage="符合性审查",
@@ -53,7 +58,7 @@ def test_mock_model_pipeline_and_fill_review(monkeypatch):
 
     monkeypatch.setattr(extraction, "structured_text", fake_structured_text)
     with TestClient(app) as client:
-        project = client.post("/api/v2/projects", json={"name": "端到端测试"}).json()
+        project = client.post("/api/v2/projects", json={"name": "离线验收（模拟模型）"}).json()
         bid = client.post(
             f"/api/v2/projects/{project['id']}/bids",
             json={
@@ -67,19 +72,19 @@ def test_mock_model_pipeline_and_fill_review(monkeypatch):
             f"/api/v2/projects/{project['id']}/response-values",
             json={
                 "key": "equipment_name",
-                "label": "设备名称",
+                "label": "Equipment",
                 "value_text": "智能控制柜",
                 "review_status": "verified",
             },
         )
         assert response_value.status_code == 201, response_value.text
 
-        for role in ("tender", "template"):
-            with SAMPLE.open("rb") as stream:
+        for role, source in (("tender", SAMPLE), ("template", empty_table_pdf)):
+            with source.open("rb") as stream:
                 response = client.post(
                     f"/api/v2/projects/{project['id']}/documents",
                     data={"role": role},
-                    files={"file": (SAMPLE.name, stream, "application/pdf")},
+                    files={"file": (source.name, stream, "application/pdf")},
                 )
             assert response.status_code == 201, response.text
 
@@ -117,9 +122,31 @@ def test_mock_model_pipeline_and_fill_review(monkeypatch):
         assert edited.status_code == 200, edited.text
         assert edited.json()["status"] == "edited"
         assert edited.json()["reviewed_at"]
+        refreshed = client.get(f"/api/v2/analysis-runs/{run_id}/fill-plan").json()
+        assert refreshed["id"] == plan_body["id"]
+        annotation = next(
+            annotation
+            for asset in refreshed["assets"]
+            for annotation in asset["annotations"]
+            if annotation["label"] == "Equipment"
+        )
+        assert annotation["value"] == "智能控制柜（已复核）"
+        assert annotation["coordinate_quality"] == "exact"
+        assert annotation["reference_only"] is False
+        assert len(refreshed["targets"]) == 3
+        assert all(target["suggestions"] for target in refreshed["targets"])
         image = client.get(f"/api/v2/annotation-assets/{plan_body['assets'][0]['id']}/image")
         assert image.status_code == 200
         assert image.headers["content-type"] == "image/png"
+        rebuilt = client.post(f"/api/v2/analysis-runs/{run_id}/fill-plan", json={})
+        assert rebuilt.status_code == 201, rebuilt.text
+        assert rebuilt.json()["id"] == plan_body["id"]
+        assert len(rebuilt.json()["targets"]) == 3
+        assert any(
+            item["value"] == "智能控制柜（已复核）" and item["status"] == "edited"
+            for target in rebuilt.json()["targets"]
+            for item in target["suggestions"]
+        )
 
 
 async def _run_worker_until(
@@ -162,8 +189,8 @@ def test_worker_failure_retries_and_marks_analysis_failed(session):
             kind="analyze_project",
             payload={"run_id": run.id},
             status=JobStatus.RUNNING,
-            attempts=3,
-            max_attempts=3,
+            attempts=1,
+            max_attempts=1,
         )
         session.add(job)
         await session.commit()
@@ -187,3 +214,110 @@ def test_worker_failure_retries_and_marks_analysis_failed(session):
 
 async def _raise_expected(_session, _job):
     raise RuntimeError("expected failure")
+
+
+def test_blocks_are_split_into_bounded_batches():
+    class Block:
+        def __init__(self, index):
+            self.text = "x" * 800
+            self.index = index
+
+    batches = _block_batches([Block(index) for index in range(20)])
+    assert len(batches) == 3
+    assert all(1 < len(batch) <= 8 for batch in batches)
+    assert all(sum(len(block.text) for block in batch) <= 6000 for batch in batches)
+
+
+def test_default_data_dir_does_not_depend_on_working_directory(monkeypatch, tmp_path):
+    from app.config import Settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TENDER_DATA_DIR")
+    settings = Settings()
+    assert settings.resolved_data_dir == Path(__file__).parents[2] / "data"
+
+
+@pytest.mark.asyncio
+async def test_truncated_model_output_is_recorded_as_failure(session, monkeypatch):
+    from app.models import ModelCall, ModelConfig
+
+    session.add(
+        ModelConfig(
+            name="test",
+            base_url="https://example.invalid/v1",
+            api_key_encrypted="unused",
+            text_model="test-model",
+            is_active=True,
+        )
+    )
+    await session.commit()
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {"content": '{"x":'},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 8192},
+            }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(model_gateway.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(model_gateway, "decrypt_secret", lambda _value: "test-key")
+    monkeypatch.setenv("TENDER_LIVE_MODEL_CALLS", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    with pytest.raises(model_gateway.ModelOutputTruncated):
+        await model_gateway.complete_text(
+            session,
+            system="system",
+            user="user",
+            purpose="test",
+            max_tokens=8192,
+        )
+
+    call = (await session.execute(__import__("sqlalchemy").select(ModelCall))).scalar_one()
+    assert call.success is False
+    assert call.output_tokens == 8192
+    assert "长度上限" in (call.error or "")
+
+
+async def test_live_model_calls_are_disabled_by_default(session):
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    with pytest.raises(model_gateway.LiveModelCallsDisabled):
+        await model_gateway.complete_text(
+            session,
+            system="system",
+            user="user",
+            purpose="test",
+        )
+    from app.services.vision import transcribe_scanned_page
+
+    with pytest.raises(model_gateway.LiveModelCallsDisabled):
+        await transcribe_scanned_page(session, Path("unused.png"))
+    success, _, _ = await model_gateway.test_model(
+        base_url="https://example.invalid/v1", api_key="unused", model="unused"
+    )
+    assert success is False

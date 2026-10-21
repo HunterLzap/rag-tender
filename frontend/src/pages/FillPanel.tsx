@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { isAxiosError } from 'axios';
 import {
   Alert,
   Box,
@@ -6,6 +7,7 @@ import {
   Chip,
   CircularProgress,
   Grid,
+  MenuItem,
   Paper,
   Stack,
   TextField,
@@ -18,6 +20,7 @@ import {
   type FillPlan,
   type FillSuggestion,
   type FillTarget,
+  type PageItem,
 } from '../lib/api';
 
 interface Props {
@@ -36,6 +39,7 @@ const statusLabel: Record<string, string> = {
 export default function FillPanel({ runId, projectId }: Props) {
   const queryClient = useQueryClient();
   const [selectedTargetId, setSelectedTargetId] = useState('');
+  const [templateChoiceId, setTemplateChoiceId] = useState('');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
@@ -52,11 +56,26 @@ export default function FillPanel({ runId, projectId }: Props) {
   const templates = documents.data?.filter(
     (document) => document.role === 'template' && document.current_revision_id,
   ) ?? [];
-  const templateId = templates[0]?.id;
+  const templateId =
+    templates.find((document) => document.id === templateChoiceId)?.id ?? templates[0]?.id;
+  const templatePages = useQuery({
+    queryKey: ['template-pages', templateId],
+    enabled: Boolean(templateId),
+    queryFn: async () => (await api.get<PageItem[]>(`/documents/${templateId}/pages`)).data,
+  });
   const plan = useQuery({
     queryKey: ['fill-plan', runId, templateId],
     enabled: Boolean(templateId),
     queryFn: async () => {
+      try {
+        return (
+          await api.get<FillPlan>(`/analysis-runs/${runId}/fill-plan`, {
+            params: { template_document_id: templateId },
+          })
+        ).data;
+      } catch (err) {
+        if (!isAxiosError(err) || err.response?.status !== 404) throw err;
+      }
       const response = await api.post<FillPlan>(`/analysis-runs/${runId}/fill-plan`, {
         template_document_id: templateId,
       });
@@ -113,9 +132,10 @@ export default function FillPanel({ runId, projectId }: Props) {
           template_document_id: templateId,
         })
       ).data,
-    onSuccess: async () => {
+    onSuccess: (result) => {
       setMessage('填写计划已重建，已审阅的内容会保留');
-      await queryClient.invalidateQueries({ queryKey: ['fill-plan', runId, templateId] });
+      queryClient.setQueryData(['fill-plan', runId, templateId], result);
+      setSelectedTargetId('');
     },
     onError: (err) => setError(apiError(err, '重建填写计划失败')),
   });
@@ -150,6 +170,7 @@ export default function FillPanel({ runId, projectId }: Props) {
   return (
     <Stack spacing={2}>
       {error && <Alert severity="error">{error}</Alert>}
+      {plan.error && <Alert severity="error">{apiError(plan.error, '加载填写计划失败')}</Alert>}
       {message && <Alert severity="success">{message}</Alert>}
       <Paper variant="outlined" sx={{ p: 2, bgcolor: 'rgba(255,253,247,.86)' }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2} flexWrap="wrap">
@@ -159,6 +180,21 @@ export default function FillPanel({ runId, projectId }: Props) {
               {selectedPlan?.targets.length ?? 0} 个填写位置，{selectedPlan?.assets.length ?? 0} 张标注图
             </Typography>
           </Box>
+          <TextField
+            select
+            size="small"
+            label="投标模板"
+            value={templateId ?? ''}
+            onChange={(event) => {
+              setTemplateChoiceId(event.target.value);
+              setSelectedTargetId('');
+            }}
+            sx={{ minWidth: 200, maxWidth: 340 }}
+          >
+            {templates.map((document) => (
+              <MenuItem key={document.id} value={document.id}>{document.filename}</MenuItem>
+            ))}
+          </TextField>
           <Button variant="outlined" disabled={rebuild.isPending} onClick={() => rebuild.mutate()}>
             重新识别模板
           </Button>
@@ -175,7 +211,7 @@ export default function FillPanel({ runId, projectId }: Props) {
               {[...groupedTargets.entries()].map(([pageId, targets]) => (
                 <Box key={pageId}>
                   <Typography variant="overline" sx={{ px: 2, pt: 2, display: 'block' }}>
-                    页面 {targets[0]?.page_id.slice(0, 6)}
+                    第 {(templatePages.data?.find((page) => page.id === pageId)?.page_index ?? 0) + 1} 页
                   </Typography>
                   {targets.map((target) => {
                     const suggestion = target.suggestions[0];
@@ -242,7 +278,9 @@ export default function FillPanel({ runId, projectId }: Props) {
                 <AnnotatedImage asset={selectedAsset} />
               ) : (
                 <Box sx={{ p: 5, bgcolor: '#f0ece2', textAlign: 'center' }}>
-                  <Typography color="text.secondary">该页没有生成标注图。</Typography>
+                  <Typography color="text.secondary">
+                    该模板没有固定页面图，仍可在下方填写和复核；需要原页面标注图时请上传 PDF。
+                  </Typography>
                 </Box>
               )}
             </Paper>
@@ -318,7 +356,7 @@ function AnnotatedImage({ asset }: { asset: AnnotationAsset }) {
   return (
     <Box className="page-canvas paper-frame" sx={{ overflow: 'auto', maxHeight: 660 }}>
       <img
-        src={`/api/v2/annotation-assets/${asset.id}/image`}
+        src={`/api/v2/annotation-assets/${asset.id}/image?v=${encodeURIComponent(asset.updated_at)}`}
         alt="模板标注图"
         style={{ minWidth: 520 }}
       />

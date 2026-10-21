@@ -30,6 +30,10 @@ export default function SettingsPage() {
   const [message, setMessage] = useState('');
   const [messageSeverity, setMessageSeverity] = useState<'info' | 'success' | 'error'>('info');
   const [testing, setTesting] = useState(false);
+  const runtime = useQuery({
+    queryKey: ['runtime'],
+    queryFn: async () => (await api.get<{ live_model_calls: boolean }>('/health')).data,
+  });
   const configs = useQuery({
     queryKey: ['model-configs'],
     queryFn: async () => (await api.get<ModelConfig[]>('/model-configs')).data,
@@ -96,6 +100,11 @@ export default function SettingsPage() {
         <Typography variant="h3">模型配置</Typography>
       </Box>
       {message && <Alert severity={messageSeverity}>{message}</Alert>}
+      {runtime.data && !runtime.data.live_model_calls && (
+        <Alert severity="info">
+          当前为离线开发模式，配置可以保存，真实模型调用和连接测试已关闭。
+        </Alert>
+      )}
       <Paper variant="outlined" sx={{ p: 3, bgcolor: 'rgba(255,253,247,.85)' }}>
         <Stack spacing={2}>
           <TextField label="配置名称" value={name} onChange={(event) => setName(event.target.value)} />
@@ -131,7 +140,7 @@ export default function SettingsPage() {
             </Button>
             <Button
               variant="outlined"
-              disabled={testing || !textModel}
+              disabled={testing || !textModel || !runtime.data?.live_model_calls}
               onClick={() => void testConnection()}
             >
               测试连接

@@ -59,6 +59,7 @@ export interface PageItem {
   text: string;
   parse_mode: string;
   quality_flags: string[];
+  native_locator: Record<string, unknown>;
 }
 
 export interface SourceSpan {
@@ -147,6 +148,7 @@ export interface AnnotationAsset {
   height: number;
   annotations: Array<Record<string, unknown>>;
   created_at: string;
+  updated_at: string;
 }
 
 export interface FillPlan {

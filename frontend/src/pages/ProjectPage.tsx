@@ -58,6 +58,10 @@ export default function ProjectPage() {
     queryKey: ['project', projectId],
     queryFn: async () => (await api.get<Project>(`/projects/${projectId}`)).data,
   });
+  const runtime = useQuery({
+    queryKey: ['runtime'],
+    queryFn: async () => (await api.get<{ live_model_calls: boolean }>('/health')).data,
+  });
   const documents = useQuery({
     queryKey: ['documents', projectId],
     queryFn: async () => (await api.get<DocumentItem[]>(`/projects/${projectId}/documents`)).data,
@@ -239,14 +243,22 @@ export default function ProjectPage() {
               )}
               <Button
                 variant="contained"
-                disabled={!parsedDocuments.length || analyze.isPending}
+                disabled={
+                  !parsedDocuments.length || analyze.isPending || !runtime.data?.live_model_calls
+                }
                 onClick={() => analyze.mutate()}
               >
                 开始新一轮分析
               </Button>
+              {runtime.data && !runtime.data.live_model_calls && (
+                <Typography variant="body2" color="text.secondary">
+                  离线开发模式：真实分析已关闭，可查看已有结果和编辑填写建议。
+                </Typography>
+              )}
               {jobs.data?.slice(0, 3).map((job) => (
                 <Box key={job.id}>
                   <Typography variant="caption">{job.stage}</Typography>
+                  {job.error && <Typography variant="body2" color="error">{job.error}</Typography>}
                   <Divider />
                 </Box>
               ))}

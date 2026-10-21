@@ -17,6 +17,17 @@ Handler = Callable[[AsyncSession, Job], Awaitable[dict[str, Any] | None]]
 _handlers: dict[str, Handler] = {}
 
 
+class JobCanceled(RuntimeError):
+    pass
+
+
+async def check_canceled(session: AsyncSession, job_id: str | None) -> None:
+    if job_id and (
+        await session.execute(select(Job.cancel_requested).where(Job.id == job_id))
+    ).scalar_one_or_none():
+        raise JobCanceled("任务已取消")
+
+
 def register_handler(kind: str, handler: Handler) -> None:
     _handlers[kind] = handler
 
@@ -42,6 +53,8 @@ async def enqueue(session: AsyncSession, kind: str, payload: dict[str, Any]) -> 
         kind=kind,
         payload={key: value for key, value in payload.items() if key != "_dedupe_key"},
         dedupe_key=dedupe_key,
+        # Model-backed work must not be repeated automatically after a partial run.
+        max_attempts=1 if kind == "analyze_project" else 3,
     )
     if kind == "parse_document":
         document = await session.get(
@@ -105,6 +118,7 @@ async def recover_expired_jobs(session: AsyncSession) -> int:
             Job.status == JobStatus.RUNNING,
             Job.lease_until.is_not(None),
             Job.lease_until < now,
+            Job.attempts < Job.max_attempts,
         )
         .values(
             status=JobStatus.QUEUED,
@@ -118,6 +132,42 @@ async def recover_expired_jobs(session: AsyncSession) -> int:
     return result.rowcount or 0
 
 
+async def fail_exhausted_jobs(session: AsyncSession) -> int:
+    now = utcnow()
+    result = await session.execute(
+        update(Job)
+        .where(
+            Job.status == JobStatus.RUNNING,
+            Job.lease_until.is_not(None),
+            Job.lease_until < now,
+            Job.attempts >= Job.max_attempts,
+        )
+        .values(
+            status=JobStatus.FAILED,
+            stage="失败：超过最大重试次数",
+            lease_owner=None,
+            lease_until=None,
+            finished_at=now,
+        )
+        .returning(Job.kind, Job.payload)
+    )
+    failed = result.all()
+    for kind, payload in failed:
+        if kind == "analyze_project":
+            await session.execute(
+                update(AnalysisRun)
+                .where(AnalysisRun.id == payload.get("run_id"))
+                .values(
+                    status=AnalysisStatus.FAILED,
+                    stage="analysis_failed",
+                    error="任务超时，未自动重复模型调用",
+                    finished_at=now,
+                )
+            )
+    await session.commit()
+    return len(failed)
+
+
 async def request_cancel(session: AsyncSession, job_id: str) -> Job:
     job = await session.get(Job, job_id)
     if job is None:
@@ -127,6 +177,13 @@ async def request_cancel(session: AsyncSession, job_id: str) -> Job:
         job.status = JobStatus.CANCELED
         job.stage = "已取消"
         job.finished_at = utcnow()
+        if job.kind == "analyze_project":
+            run = await session.get(AnalysisRun, job.payload.get("run_id"))
+            if run:
+                run.status = AnalysisStatus.FAILED
+                run.stage = "analysis_canceled"
+                run.error = "任务已取消"
+                run.finished_at = utcnow()
     await session.commit()
     return job
 
@@ -155,22 +212,9 @@ async def _process_one(session: AsyncSession, job: Job) -> None:
     if handler is None:
         raise RuntimeError(f"未注册任务类型: {job_kind}")
     try:
-        fresh = await session.get(Job, job_id)
-        if fresh and fresh.cancel_requested:
-            await session.execute(
-                update(Job)
-                .where(Job.id == job_id)
-                .values(
-                    status=JobStatus.CANCELED,
-                    stage="已取消",
-                    lease_owner=None,
-                    lease_until=None,
-                    finished_at=utcnow(),
-                )
-            )
-            await session.commit()
-            return
+        await check_canceled(session, job_id)
         result = await handler(session, job) or {}
+        await check_canceled(session, job_id)
         await session.execute(
             update(Job)
             .where(Job.id == job_id)
@@ -192,21 +236,25 @@ async def _process_one(session: AsyncSession, job: Job) -> None:
         fresh = await session.get(Job, job_id)
         if fresh is None:
             return
-        retry = fresh.attempts < fresh.max_attempts
+        canceled = isinstance(exc, JobCanceled) or fresh.cancel_requested
+        retry = not canceled and fresh.attempts < fresh.max_attempts
         if fresh.kind == "analyze_project" and not retry:
             run = await session.get(AnalysisRun, fresh.payload.get("run_id", ""))
             if run is not None:
                 run.status = AnalysisStatus.FAILED
                 run.progress = 100
-                run.stage = "analysis_failed"
+                run.stage = "analysis_canceled" if canceled else "analysis_failed"
                 run.error = f"{type(exc).__name__}: {exc}"[:4000]
                 run.finished_at = utcnow()
         await session.execute(
             update(Job)
             .where(Job.id == job_id)
             .values(
-                status=JobStatus.QUEUED if retry else JobStatus.FAILED,
-                stage="等待重试" if retry else "失败",
+                status=(
+                    JobStatus.CANCELED if canceled else
+                    JobStatus.QUEUED if retry else JobStatus.FAILED
+                ),
+                stage="已取消" if canceled else "等待重试" if retry else "失败",
                 error=f"{type(exc).__name__}: {exc}"[:4000],
                 lease_owner=None,
                 lease_until=None,
@@ -223,6 +271,7 @@ async def worker_loop(stop_event: asyncio.Event, poll_seconds: float, lease_seco
     while not stop_event.is_set():
         session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
         async with session_factory() as session:
+            await fail_exhausted_jobs(session)
             await recover_expired_jobs(session)
             job = await claim_job(session, worker_id, lease_seconds)
             if job is None:

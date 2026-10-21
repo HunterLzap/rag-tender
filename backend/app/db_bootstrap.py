@@ -18,6 +18,7 @@ from app.config import get_settings
 
 V2_TABLES = {"projects", "documents", "analysis_runs", "fill_suggestions"}
 BASELINE_REVISION = "fcb21467dc21"
+KNOWN_REVISIONS = {BASELINE_REVISION, "a19b2f0e71d4"}
 
 
 async def _table_names() -> set[str]:
@@ -64,9 +65,10 @@ def bootstrap() -> None:
                     "INSERT OR REPLACE INTO alembic_version (version_num) VALUES (?)",
                     (BASELINE_REVISION,),
                 )
-            elif current[0] != BASELINE_REVISION:
+            elif current[0] not in KNOWN_REVISIONS:
                 raise RuntimeError(
-                    f"unexpected alembic revision {current[0]}; expected {BASELINE_REVISION}"
+                    f"unexpected alembic revision {current[0]}; "
+                    f"expected one of {sorted(KNOWN_REVISIONS)}"
                 )
     command.upgrade(config, "head")
 

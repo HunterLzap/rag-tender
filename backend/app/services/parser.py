@@ -56,6 +56,17 @@ def _words_to_lines(words: Iterable[dict]) -> list[dict]:
             )
     for line in lines:
         line["text"] = " ".join(word["text"] for word in line["words"])
+        offset = 0
+        line["word_spans"] = []
+        for word in line["words"]:
+            line["word_spans"].append(
+                {
+                    "start": offset,
+                    "end": offset + len(word["text"]),
+                    "bbox": [word["x0"], word["top"], word["x1"], word["bottom"]],
+                }
+            )
+            offset += len(word["text"]) + 1
     return lines
 
 
@@ -89,6 +100,7 @@ def _parse_pdf(path: Path, render_dir: Path | None) -> ParsedDocument:
                             text=line["text"],
                             bbox=(line["x0"], line["top"], line["x1"], line["bottom"]),
                             order=order,
+                            metadata={"word_spans": line["word_spans"]},
                         )
                     )
                     order += 1
@@ -98,31 +110,30 @@ def _parse_pdf(path: Path, render_dir: Path | None) -> ParsedDocument:
                     extracted = table.extract()
                     if not extracted:
                         continue
-                    cell_boxes = table.cells
+                    table_rows = table.rows
+                    x_edges = sorted({x for cell in table.cells for x in (cell[0], cell[2])})
+                    y_edges = sorted({y for cell in table.cells for y in (cell[1], cell[3])})
                     cells: list[ParsedCell] = []
                     for row_index, row in enumerate(extracted):
                         for col_index, value in enumerate(row):
                             value = _clean_text(value or "")
-                            if not value:
+                            # None denotes a merged-cell continuation; "" is a real empty cell.
+                            bbox = table_rows[row_index].cells[col_index]
+                            if bbox is None:
                                 continue
-                            flat_index = row_index * len(row) + col_index
-                            bbox = (
-                                cell_boxes[flat_index]
-                                if flat_index < len(cell_boxes) and cell_boxes[flat_index]
-                                else table.bbox
-                            )
                             cells.append(
                                 ParsedCell(
                                     row=row_index,
                                     col=col_index,
-                                    row_span=1,
-                                    col_span=1,
+                                    row_span=y_edges.index(bbox[3]) - y_edges.index(bbox[1]),
+                                    col_span=x_edges.index(bbox[2]) - x_edges.index(bbox[0]),
                                     text=value,
                                     bbox=tuple(float(v) for v in bbox),
                                     native_locator={
                                         "table_index": table_index,
                                         "row": row_index,
                                         "col": col_index,
+                                        "coordinate_quality": "exact",
                                     },
                                 )
                             )
@@ -228,7 +239,6 @@ def _docx_blocks(document: DocxDocument) -> list[ParsedBlock]:
             )
             for row_index, row in enumerate(rows)
             for col_index, value in enumerate(row)
-            if value
         )
         blocks.append(
             ParsedBlock(
@@ -278,8 +288,6 @@ def _parse_xlsx(path: Path) -> ParsedDocument:
             if any(values):
                 rows_text.append(" | ".join(values))
             for col_index, value in enumerate(values):
-                if not value:
-                    continue
                 cells.append(
                     ParsedCell(
                         row=row_index,
@@ -336,7 +344,6 @@ def _parse_csv(path: Path) -> ParsedDocument:
         )
         for row_index, row in enumerate(rows)
         for col_index, value in enumerate(row)
-        if value
     )
     block = ParsedBlock(
         kind="table",

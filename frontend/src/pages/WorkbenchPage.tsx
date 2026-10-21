@@ -36,6 +36,15 @@ const decisionColor = {
   not_applicable: 'default',
 } as const;
 
+const analysisLabel: Record<string, string> = {
+  draft: '等待分析',
+  running: '正在分析',
+  needs_review: '分析完成，待人工复核',
+  completed: '已完成',
+  failed: '分析未完成',
+  stale: '资料已更新，需重新分析',
+};
+
 export default function WorkbenchPage() {
   const { runId = '' } = useParams();
   const queryClient = useQueryClient();
@@ -119,7 +128,7 @@ export default function WorkbenchPage() {
           </Typography>
           <Typography variant="h3">投标响应工作台</Typography>
           <Typography color="text.secondary" sx={{ mt: 1 }}>
-            {run.data?.stage} · {run.data?.progress ?? 0}%
+            {analysisLabel[run.data?.status ?? 'draft']} · {run.data?.progress ?? 0}%
           </Typography>
         </Box>
         <Stack direction="row" spacing={1} flexWrap="wrap">

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -107,6 +107,10 @@ def _document_read(document: Document) -> DocumentRead:
         page_count=document.page_count,
         current_revision_id=document.current_revision_id,
         current_page_count=document.page_count,
+        parse_status=(
+            "needs_review" if (document.metadata_json or {}).get("pages_needing_review")
+            else "completed" if document.current_revision_id else "pending"
+        ),
         supersedes_id=document.supersedes_id,
         created_at=document.created_at,
     )
@@ -114,7 +118,12 @@ def _document_read(document: Document) -> DocumentRead:
 
 @router.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "service": "tender-workbench", "version": "2.0.0"}
+    return {
+        "status": "ok",
+        "service": "tender-workbench",
+        "version": "2.0.0",
+        "live_model_calls": get_settings().live_model_calls,
+    }
 
 
 @router.get("/projects", response_model=list[ProjectRead])
@@ -375,9 +384,12 @@ async def create_analysis_run(
         bid_id=bid.id if bid else None,
         prompt_version=payload.prompt_version,
         ruleset_version=payload.ruleset_version,
-        model_snapshot={"model_config_id": payload.model_config_id}
-        if payload.model_config_id
-        else {},
+        model_snapshot={
+            "model_config_id": model_config.id,
+            "provider": model_config.provider,
+            "text_model": model_config.text_model,
+            "vision_model": model_config.vision_model,
+        } if model_config else {},
     )
     session.add(run)
     await session.flush()
@@ -386,7 +398,7 @@ async def create_analysis_run(
         "analyze_project",
         {
             "run_id": run.id,
-            "model_config_id": payload.model_config_id,
+            "model_config_id": model_config.id if model_config else None,
             "_dedupe_key": f"analyze:{run.id}",
         },
     )
@@ -513,6 +525,9 @@ async def create_review(
         evidence_snapshot=decision.evidence_ids,
     )
     session.add(review)
+    await session.flush()
+    await build_checklist(session, decision.run_id)
+    await mark_run_complete_if_ready(session, decision.run_id)
     await session.commit()
     return review
 
@@ -792,6 +807,8 @@ async def build_fill_plan(
     )
     if template is None:
         raise HTTPException(400, "请先上传投标模板")
+    if template.current_revision_id is None:
+        raise HTTPException(400, "投标模板尚未解析完成")
     existing = (
         await session.execute(
             select(FillPlan)
@@ -801,7 +818,6 @@ async def build_fill_plan(
         )
     ).scalar_one_or_none()
     if existing:
-        await session.execute(delete(AnnotationAsset).where(AnnotationAsset.plan_id == existing.id))
         plan = await rebuild_fill_plan(session, existing, project_id=run.project_id)
     else:
         await detect_fill_slots(session, template)
@@ -809,7 +825,26 @@ async def build_fill_plan(
             session, run_id=run_id, project_id=run.project_id, template_document=template
         )
     await render_annotations(session, plan)
+    await build_checklist(session, run_id)
+    await mark_run_complete_if_ready(session, run_id)
     await session.commit()
+    return await _load_fill_plan(session, plan.id)
+
+
+@router.get("/analysis-runs/{run_id}/fill-plan", response_model=FillPlanRead)
+async def read_run_fill_plan(
+    run_id: str,
+    template_document_id: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(FillPlan).where(FillPlan.run_id == run_id)
+    if template_document_id:
+        query = query.where(FillPlan.document_id == template_document_id)
+    plan = (
+        await session.execute(query.order_by(FillPlan.created_at.desc()).limit(1))
+    ).scalar_one_or_none()
+    if plan is None:
+        raise HTTPException(404, "尚未生成填写计划")
     return await _load_fill_plan(session, plan.id)
 
 
@@ -869,6 +904,8 @@ async def update_fill_suggestion(
     data = payload.model_dump(exclude_unset=True)
     if "value" in data and data["value"] != suggestion.value:
         data.setdefault("status", SuggestionStatus.EDITED.value)
+    if data.get("status") is not None:
+        data["status"] = SuggestionStatus(data["status"])
     for key, value in data.items():
         setattr(suggestion, key, value)
     suggestion.reviewed_at = datetime.now(UTC)
@@ -877,6 +914,7 @@ async def update_fill_suggestion(
     if target is not None and target.plan_id:
         plan = await session.get(FillPlan, target.plan_id)
         if plan is not None:
+            await render_annotations(session, plan)
             await build_checklist(session, plan.run_id)
             await mark_run_complete_if_ready(session, plan.run_id)
             await session.commit()

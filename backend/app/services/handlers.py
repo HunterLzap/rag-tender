@@ -6,21 +6,26 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import utcnow
 from app.models import (
     AnalysisRun,
     AnalysisStatus,
+    Block,
     ChecklistItem,
     Document,
     Job,
     Page,
+    ParseStatus,
+    SourceSpan,
 )
 from app.services.analysis import decide_run
 from app.services.checklist import build_checklist
 from app.services.extraction import extract_requirements_for_run
 from app.services.ir_persistence import persist_parsed_document, rebuild_section_tree
-from app.services.jobs import mark_progress, register_handler
+from app.services.jobs import JobCanceled, mark_progress, register_handler
 from app.services.parser import parse_document
 from app.services.vision import transcribe_scanned_page
+from app.storage import sha256_text
 
 logger = logging.getLogger(__name__)
 
@@ -59,17 +64,53 @@ async def parse_document_job(session: AsyncSession, job: Job) -> dict[str, Any]:
             page_record.quality_flags = [
                 flag for flag in page_record.quality_flags if flag != "vision_pending"
             ]
+            page_record.quality_flags.append("vision_coordinates_unverified")
+            block = Block(
+                page_id=page_record.id,
+                kind="vision_text",
+                reading_order=0,
+                text=text,
+                x0=0,
+                y0=0,
+                x1=page_record.width,
+                y1=page_record.height,
+                metadata_json={"coordinate_quality": "page"},
+            )
+            session.add(block)
+            await session.flush()
+            session.add(
+                SourceSpan(
+                    document_id=document.id,
+                    revision_id=revision.id,
+                    page_id=page_record.id,
+                    block_id=block.id,
+                    char_start=0,
+                    char_end=len(text),
+                    quote=text,
+                    quote_hash=sha256_text(text),
+                    bbox_json=[0, 0, page_record.width, page_record.height],
+                )
+            )
+        except JobCanceled:
+            raise
         except RuntimeError as exc:
             logger.warning("vision transcription skipped: %s", exc)
             page_record.quality_flags = [
                 *page_record.quality_flags,
                 "vision_failed",
             ]
+        revision.parse_status = ParseStatus.NEEDS_REVIEW
+    review_pages = [
+        page.page_index + 1
+        for page in page_records
+        if page.parse_mode == "needs_vision" or page.parse_mode == "vision"
+    ]
     await session.flush()
     await rebuild_section_tree(session, revision.id)
     document.metadata_json = {
         **(document.metadata_json or {}),
         "last_parsed_revision": revision.id,
+        "pages_needing_review": review_pages,
     }
     await session.commit()
     await mark_progress(session, job.id, progress=95, stage="文档解析完成")
@@ -77,6 +118,7 @@ async def parse_document_job(session: AsyncSession, job: Job) -> dict[str, Any]:
         "document_id": document.id,
         "revision_id": revision.id,
         "page_count": len(parsed.pages),
+        "pages_needing_review": review_pages,
     }
 
 
@@ -127,6 +169,8 @@ async def analyze_project_job(session: AsyncSession, job: Job) -> dict[str, Any]
     run.status = (
         AnalysisStatus.NEEDS_REVIEW if notes or open_items else AnalysisStatus.COMPLETED
     )
+    run.progress = 100
+    run.finished_at = utcnow()
     await session.commit()
     return {
         "run_id": run.id,

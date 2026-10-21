@@ -12,12 +12,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import ModelCall, ModelConfig
 from app.security import decrypt_secret
+from app.services.jobs import check_canceled
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
 class ModelGatewayError(RuntimeError):
+    pass
+
+
+class LiveModelCallsDisabled(ModelGatewayError):
+    pass
+
+
+class ModelOutputTruncated(ModelGatewayError):
     pass
 
 
@@ -51,6 +60,11 @@ async def complete_text(
     temperature: float = 0.1,
     max_tokens: int = 4096,
 ) -> str:
+    if not get_settings().live_model_calls:
+        raise LiveModelCallsDisabled(
+            "真实模型调用已禁用；请使用模拟模型，或显式设置 TENDER_LIVE_MODEL_CALLS=true"
+        )
+    await check_canceled(session, job_id)
     active = await get_active_model(session, config_id)
     settings = get_settings()
     started = time.monotonic()
@@ -77,38 +91,73 @@ async def complete_text(
             response.raise_for_status()
             body = response.json()
         content = body["choices"][0]["message"]["content"]
+        finish_reason = body["choices"][0].get("finish_reason")
         usage = body.get("usage") or {}
-        session.add(
-            ModelCall(
-                job_id=job_id,
-                purpose=purpose,
-                provider=active.config.provider,
-                model=active.config.text_model,
-                prompt_version=prompt_version,
-                input_tokens=usage.get("prompt_tokens"),
-                output_tokens=usage.get("completion_tokens"),
-                latency_ms=int((time.monotonic() - started) * 1000),
-                success=True,
-            )
-        )
-        await session.commit()
-        return content
     except Exception as exc:
-        await session.rollback()
-        session.add(
-            ModelCall(
-                job_id=job_id,
-                purpose=purpose,
-                provider=active.config.provider,
-                model=active.config.text_model,
-                prompt_version=prompt_version,
-                latency_ms=int((time.monotonic() - started) * 1000),
-                success=False,
-                error=f"{type(exc).__name__}: {exc}"[:2000],
-            )
+        await _record_model_call(
+            session,
+            job_id=job_id,
+            purpose=purpose,
+            provider=active.config.provider,
+            model=active.config.text_model,
+            prompt_version=prompt_version,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            success=False,
+            error=f"{type(exc).__name__}: {exc}"[:2000],
         )
-        await session.commit()
         raise ModelGatewayError(f"模型调用失败: {exc}") from exc
+
+    truncated = finish_reason == "length"
+    error = (
+        f"模型输出达到长度上限 {max_tokens}，结构化内容不完整" if truncated else None
+    )
+    await _record_model_call(
+        session,
+        job_id=job_id,
+        purpose=purpose,
+        provider=active.config.provider,
+        model=active.config.text_model,
+        prompt_version=prompt_version,
+        input_tokens=usage.get("prompt_tokens"),
+        output_tokens=usage.get("completion_tokens"),
+        latency_ms=int((time.monotonic() - started) * 1000),
+        success=not truncated,
+        error=error,
+    )
+    if truncated:
+        raise ModelOutputTruncated(error)
+    return content
+
+
+async def _record_model_call(
+    session: AsyncSession,
+    *,
+    job_id: str | None,
+    purpose: str,
+    provider: str,
+    model: str,
+    prompt_version: str,
+    latency_ms: int,
+    success: bool,
+    error: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+) -> None:
+    session.add(
+        ModelCall(
+            job_id=job_id,
+            purpose=purpose,
+            provider=provider,
+            model=model,
+            prompt_version=prompt_version,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            success=success,
+            error=error,
+        )
+    )
+    await session.commit()
 
 
 async def structured_text(
@@ -128,23 +177,20 @@ async def structured_text(
         "只输出合法 JSON，不要 Markdown 代码围栏或解释。"
         f"必须符合以下 JSON Schema：\n{schema}"
     )
-    last_error: Exception | None = None
-    for attempt in range(2):
-        content = await complete_text(
-            session,
-            system=f"{system}\n\n{instruction}",
-            user=user if attempt == 0 else f"{user}\n\n上次输出未通过校验，请严格修正。",
-            purpose=purpose,
-            job_id=job_id,
-            prompt_version=prompt_version,
-            config_id=config_id,
-            max_tokens=max_tokens,
-        )
-        try:
-            return output_model.model_validate_json(_strip_fences(content))
-        except (ValidationError, ValueError) as exc:
-            last_error = exc
-    raise ModelGatewayError(f"模型结构化输出校验失败: {last_error}")
+    content = await complete_text(
+        session,
+        system=f"{system}\n\n{instruction}",
+        user=user,
+        purpose=purpose,
+        job_id=job_id,
+        prompt_version=prompt_version,
+        config_id=config_id,
+        max_tokens=max_tokens,
+    )
+    try:
+        return output_model.model_validate_json(_strip_fences(content))
+    except (ValidationError, ValueError) as exc:
+        raise ModelGatewayError(f"模型结构化输出校验失败: {exc}") from exc
 
 
 def _strip_fences(value: str) -> str:
@@ -159,6 +205,8 @@ def _strip_fences(value: str) -> str:
 async def test_model(
     *, base_url: str, api_key: str, model: str, timeout_seconds: int = 30
 ) -> tuple[bool, int, str]:
+    if not get_settings().live_model_calls:
+        return False, 0, "真实模型调用已禁用；设置 TENDER_LIVE_MODEL_CALLS=true 后才能测试连接"
     started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:

@@ -370,6 +370,7 @@ class AnnotationAssetRead(ORMModel):
     height: int
     annotations: list[dict[str, Any]]
     created_at: datetime
+    updated_at: datetime
 
 
 class ChecklistRead(ORMModel):

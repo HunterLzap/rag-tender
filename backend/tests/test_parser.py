@@ -32,3 +32,15 @@ def test_table_cells_do_not_duplicate_table_text_as_lines(tmp_path: Path):
         and block.bbox[3] <= table.bbox[3] + 2
     ]
     assert overlapping_lines == []
+
+
+def test_empty_cells_keep_exact_row_and_column_boxes(empty_table_pdf):
+    parsed = parse_document(empty_table_pdf)
+    table = next(block for block in parsed.pages[0].blocks if block.kind == "table")
+    empty_cells = [cell for cell in table.cells if cell.text == ""]
+    assert [(cell.row, cell.col) for cell in empty_cells] == [(1, 0), (1, 1), (1, 2)]
+    assert [cell.bbox for cell in empty_cells] == [
+        (50, 140, 220, 210),
+        (220, 140, 450, 210),
+        (450, 140, 550, 210),
+    ]

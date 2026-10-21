@@ -4,6 +4,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -15,7 +17,7 @@ class Settings(BaseSettings):
 
     app_name: str = "投标响应工作台"
     api_prefix: str = "/api/v2"
-    data_dir: Path = Path("../data")
+    data_dir: Path = DEFAULT_DATA_DIR
     database_url: str | None = None
     worker_poll_seconds: float = 1.0
     job_lease_seconds: int = 120
@@ -28,6 +30,7 @@ class Settings(BaseSettings):
     libreoffice_path: str | None = None
     render_scale: float = 2.0
     model_timeout_seconds: int = 180
+    live_model_calls: bool = False
     auto_create_schema: bool = True
 
     @property

@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import (
+    AnalysisRun,
     AnalysisStatus,
     ChecklistItem,
     CheckSeverity,
@@ -27,17 +28,16 @@ async def build_checklist(session: AsyncSession, run_id: str) -> list[ChecklistI
         await session.execute(
             select(Decision)
             .options(selectinload(Decision.requirement))
-            .where(
-                Decision.run_id == run_id,
-                Decision.status.in_(
-                    [DecisionStatus.NOT_MET, DecisionStatus.NEEDS_REVIEW]
-                ),
-            )
+            .where(Decision.run_id == run_id)
         )
     ).scalars().all()
     for decision in decisions:
         requirement = decision.requirement
         title = requirement.title
+        if decision.status in {DecisionStatus.MET, DecisionStatus.NOT_APPLICABLE}:
+            if title in existing:
+                existing[title].completed = True
+            continue
         if title not in existing:
             item = ChecklistItem(
                 run_id=run_id,
@@ -52,6 +52,18 @@ async def build_checklist(session: AsyncSession, run_id: str) -> list[ChecklistI
             )
             session.add(item)
             items.append(item)
+            existing[title] = item
+
+    run = await session.get(AnalysisRun, run_id)
+    for note in run.coverage_notes if run else []:
+        title = f"核验提取范围：{note}"[:500]
+        if title not in existing:
+            item = ChecklistItem(
+                run_id=run_id, title=title, detail=note, severity=CheckSeverity.WARNING
+            )
+            session.add(item)
+            items.append(item)
+            existing[title] = item
 
     fill_rows = (
         await session.execute(
@@ -63,26 +75,21 @@ async def build_checklist(session: AsyncSession, run_id: str) -> list[ChecklistI
             )
         )
     ).all()
-    reviewed_titles = {
-        f"确认填写：{target.label}"
-        for suggestion, target in fill_rows
-        if suggestion.status
-        in {
-            SuggestionStatus.ACCEPTED,
-            SuggestionStatus.EDITED,
-            SuggestionStatus.REJECTED,
-        }
-    }
+    groups: dict[str, list] = {}
     for suggestion, target in fill_rows:
         title = f"确认填写：{target.label}"
-        if title in existing:
-            continue
-        reviewed = suggestion.status in {
-            SuggestionStatus.ACCEPTED,
-            SuggestionStatus.EDITED,
-            SuggestionStatus.REJECTED,
-        }
-        if not reviewed:
+        groups.setdefault(title, []).append((suggestion, target))
+    for title, rows in groups.items():
+        reviewed = all(
+            suggestion.status in {
+                SuggestionStatus.ACCEPTED,
+                SuggestionStatus.EDITED,
+                SuggestionStatus.REJECTED,
+            }
+            for suggestion, _target in rows
+        )
+        if title not in existing and not reviewed:
+            suggestion, target = rows[0]
             item = ChecklistItem(
                 run_id=run_id,
                 requirement_id=target.requirement_id,
@@ -92,17 +99,15 @@ async def build_checklist(session: AsyncSession, run_id: str) -> list[ChecklistI
             )
             session.add(item)
             items.append(item)
-    for item in items:
-        if item.title in reviewed_titles:
-            item.completed = True
+            existing[title] = item
+        if title in existing:
+            existing[title].completed = reviewed
 
     await session.flush()
     return items
 
 
 async def mark_run_complete_if_ready(session: AsyncSession, run_id: str) -> None:
-    from app.models import AnalysisRun
-
     run = await session.get(AnalysisRun, run_id)
     if run is None:
         return

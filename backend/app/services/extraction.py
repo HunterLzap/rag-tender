@@ -18,7 +18,8 @@ from app.models import (
     RequirementStatus,
     SourceSpan,
 )
-from app.services.model_gateway import structured_text
+from app.services.model_gateway import ModelOutputTruncated, structured_text
+from app.storage import sha256_text
 
 
 class ExtractedRequirement(BaseModel):
@@ -58,7 +59,11 @@ EXTRACTION_SYSTEM = """你是招投标文件要求提取器。
 4. 区分硬性、评分、建议和信息说明；
 5. 区分证据匹配、文件提交、技术响应、商务响应、待办和人工判断。
 
-不要编造要求。无法定位的内容不要输出。"""
+不要编造要求。无法定位的内容不要输出。
+输出保持简短：title 不超过 40 字，statement 不超过 160 字，coverage_notes 为空。"""
+
+MAX_BLOCKS_PER_BATCH = 8
+MAX_BATCH_CHARS = 6000
 
 
 def content_fingerprint(category: str, statement: str) -> str:
@@ -88,9 +93,28 @@ async def extract_requirements_for_run(
     ).scalars().all()
     if not pages:
         raise RuntimeError("项目没有可分析的招标文件页面")
-    all_requirements: list[ExtractedRequirement] = []
     coverage_notes: list[str] = []
+    created = 0
+    seen = set(
+        (
+            await session.execute(
+                select(Requirement.fingerprint).where(Requirement.run_id == run.id)
+            )
+        ).scalars()
+    )
+    run.input_snapshot = [
+        {"document_id": document.id, "revision_id": document.current_revision_id}
+        for document in (
+            await session.execute(
+                select(Document).where(Document.project_id == run.project_id)
+            )
+        ).scalars()
+    ]
     for index, page in enumerate(pages):
+        if page.parse_mode in {"needs_vision", "vision"}:
+            coverage_notes.append(
+                f"第 {page.page_index + 1} 页为扫描页，文字和原文位置需人工复核"
+            )
         blocks = (
             await session.execute(
                 select(Block).where(Block.page_id == page.id).order_by(Block.reading_order)
@@ -98,105 +122,75 @@ async def extract_requirements_for_run(
         ).scalars().all()
         if not blocks:
             coverage_notes.append(f"第 {page.page_index + 1} 页没有可分析文本")
-            continue
-        page_payload = {
-            "page_index": page.page_index,
-            "printed_label": page.printed_label,
-            "blocks": [
-                {
-                    "block_id": block.id,
-                    "kind": block.kind,
-                    "text": block.text,
-                }
-                for block in blocks
-            ],
-        }
-        result = await structured_text(
-            session,
-            system=EXTRACTION_SYSTEM,
-            user=(
-                "请分析以下页面，提取所有 actionable requirements。\n"
-                f"{json.dumps(page_payload, ensure_ascii=False)}"
-            ),
-            output_model=ExtractedRequirements,
-            purpose="extract_requirements",
-            job_id=job_id,
-            prompt_version=run.prompt_version,
-            config_id=config_id,
-        )
-        all_requirements.extend(result.requirements)
-        coverage_notes.extend(
-            f"第 {page.page_index + 1} 页：{note}" for note in result.coverage_notes
-        )
+        block_cache = {block.id: block for block in blocks}
+        for batch_no, batch in enumerate(_block_batches(blocks), start=1):
+            result = await _extract_bounded_batch(
+                session,
+                page=page,
+                blocks=batch,
+                batch_no=batch_no,
+                run=run,
+                job_id=job_id,
+                config_id=config_id,
+            )
+            coverage_notes.extend(
+                f"第 {page.page_index + 1} 页：{note}" for note in result.coverage_notes
+            )
+            for item in result.requirements:
+                block = block_cache.get(item.block_id)
+                if block is None:
+                    coverage_notes.append(f"定位失败：{item.title}")
+                    continue
+                offsets = _quote_offsets(item.quote, block.text)
+                if offsets is None:
+                    coverage_notes.append(f"原文校验失败：{item.title}")
+                    continue
+                fingerprint = content_fingerprint(item.category, item.statement)
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                start, end = offsets
+                quote = block.text[start:end]
+                span = SourceSpan(
+                    document_id=page.document_id,
+                    revision_id=page.revision_id,
+                    page_id=page.id,
+                    block_id=block.id,
+                    char_start=start,
+                    char_end=end,
+                    quote=quote,
+                    quote_hash=sha256_text(quote),
+                    bbox_json=[block.x0, block.y0, block.x1, block.y1],
+                )
+                session.add(span)
+                await session.flush()
+                session.add(
+                    Requirement(
+                        run_id=run.id,
+                        category=item.category,
+                        evaluation_stage=item.evaluation_stage,
+                        evaluation_type=item.evaluation_type,
+                        obligation=item.obligation,
+                        consequence=item.consequence,
+                        handling_mode=item.handling_mode,
+                        title=item.title,
+                        statement=item.statement,
+                        condition_json=extract_condition(item.statement, item.category),
+                        status=RequirementStatus.EXTRACTED,
+                        confidence=item.confidence,
+                        extraction_method="llm",
+                        source_span_id=span.id,
+                        fingerprint=fingerprint,
+                    )
+                )
+                created += 1
+        run.coverage_notes = list(coverage_notes)
+        # A later page failure must not discard already validated requirements.
+        await session.commit()
         if progress_cb:
             await progress_cb(index + 1, len(pages))
 
-    block_cache = {
-        block.id: block
-        for page in pages
-        for block in (
-            await session.execute(select(Block).where(Block.page_id == page.id))
-        ).scalars()
-    }
-    created = 0
-    seen: set[str] = set()
-    for item in all_requirements:
-        block = block_cache.get(item.block_id)
-        if block is None:
-            coverage_notes.append(f"定位失败：{item.title}")
-            continue
-        if item.quote not in block.text and not _loose_quote_match(item.quote, block.text):
-            coverage_notes.append(f"原文校验失败：{item.title}")
-            continue
-        fingerprint = content_fingerprint(item.category, item.statement)
-        if fingerprint in seen:
-            continue
-        seen.add(fingerprint)
-        span = (
-            await session.execute(
-                select(SourceSpan)
-                .where(SourceSpan.block_id == block.id)
-                .order_by(SourceSpan.created_at)
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if span is None:
-            coverage_notes.append(f"缺少来源片段：{item.title}")
-            continue
-        condition = extract_condition(item.statement, item.category)
-        requirement = Requirement(
-            run_id=run.id,
-            category=item.category,
-            evaluation_stage=item.evaluation_stage,
-            evaluation_type=item.evaluation_type,
-            obligation=item.obligation,
-            consequence=item.consequence,
-            handling_mode=item.handling_mode,
-            title=item.title,
-            statement=item.statement,
-            condition_json=condition,
-            status=RequirementStatus.EXTRACTED,
-            confidence=item.confidence,
-            extraction_method="llm",
-            source_span_id=span.id,
-            fingerprint=fingerprint,
-        )
-        session.add(requirement)
-        created += 1
-    await session.flush()
-    run.input_snapshot = [
-        {
-            "document_id": document.id,
-            "revision_id": document.current_revision_id,
-        }
-        for document in (
-            await session.execute(
-                select(Document).where(Document.project_id == run.project_id)
-            )
-        ).scalars()
-    ]
-    run.coverage_notes = coverage_notes
-    if created == 0:
+    if not seen:
         coverage_notes.append("未提取到任何带可验证原文位置的要求")
     run.coverage_notes = coverage_notes
     run.status = AnalysisStatus.NEEDS_REVIEW if coverage_notes else AnalysisStatus.COMPLETED
@@ -205,11 +199,93 @@ async def extract_requirements_for_run(
     return created, coverage_notes
 
 
-def _loose_quote_match(quote: str, source: str) -> bool:
-    def normalize(value: str) -> str:
-        return re.sub(r"\s+", "", value or "")
+def _block_batches(blocks: list[Block]) -> list[list[Block]]:
+    batches: list[list[Block]] = []
+    current: list[Block] = []
+    current_chars = 0
+    for block in blocks:
+        block_chars = len(block.text)
+        if current and (
+            len(current) >= MAX_BLOCKS_PER_BATCH
+            or current_chars + block_chars > MAX_BATCH_CHARS
+        ):
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(block)
+        current_chars += block_chars
+    if current:
+        batches.append(current)
+    return batches
 
-    return normalize(quote) in normalize(source)
+
+async def _extract_bounded_batch(
+    session: AsyncSession,
+    *,
+    blocks: list[Block],
+    **kwargs,
+) -> ExtractedRequirements:
+    try:
+        return await _extract_batch(session, blocks=blocks, **kwargs)
+    except ModelOutputTruncated:
+        if len(blocks) == 1:
+            raise
+        midpoint = len(blocks) // 2
+        result = ExtractedRequirements()
+        for part in (blocks[:midpoint], blocks[midpoint:]):
+            extracted = await _extract_bounded_batch(session, blocks=part, **kwargs)
+            result.requirements.extend(extracted.requirements)
+            result.coverage_notes.extend(extracted.coverage_notes)
+        return result
+
+
+async def _extract_batch(
+    session: AsyncSession,
+    *,
+    page: Page,
+    blocks: list[Block],
+    batch_no: int,
+    run: AnalysisRun,
+    job_id: str | None,
+    config_id: str | None,
+) -> ExtractedRequirements:
+    page_payload = {
+        "page_index": page.page_index,
+        "printed_label": page.printed_label,
+        "batch": batch_no,
+        "blocks": [
+            {"block_id": block.id, "kind": block.kind, "text": block.text}
+            for block in blocks
+        ],
+    }
+    return await structured_text(
+        session,
+        system=EXTRACTION_SYSTEM,
+        user=(
+            "请分析以下文本块，只提取 actionable requirements。"
+            "完整提取行动要求，没有要求返回空数组。"
+            "quote 只引用足以证明该要求的原文，不要复述整段原文。\n"
+            f"{json.dumps(page_payload, ensure_ascii=False)}"
+        ),
+        output_model=ExtractedRequirements,
+        purpose="extract_requirements",
+        job_id=job_id,
+        prompt_version=run.prompt_version,
+        config_id=config_id,
+    )
+
+
+def _quote_offsets(quote: str, source: str) -> tuple[int, int] | None:
+    start = source.find(quote)
+    if start >= 0:
+        return start, start + len(quote)
+    normalized = re.sub(r"\s+", "", quote)
+    positions = [index for index, char in enumerate(source) if not char.isspace()]
+    compact = "".join(source[index] for index in positions)
+    start = compact.find(normalized)
+    if not normalized or start < 0:
+        return None
+    return positions[start], positions[start + len(normalized) - 1] + 1
 
 
 def as_of_date(value: date | None) -> date:

@@ -60,7 +60,9 @@ samples/*原始*
 # 数据库文件（已在 data/ 下，双重保险）
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 
 # v2 encrypted local master key
-data/.secret_key
+.secret_key
 data.*
