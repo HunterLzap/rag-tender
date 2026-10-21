@@ -16,9 +16,11 @@ import {
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { EmptyState, Guidance } from '../components/Workspace';
+import { ConfirmDialog, EmptyState, Guidance } from '../components/Workspace';
+import FillTargetEditor from '../components/FillTargetEditor';
 import {
   api,
+  apiError,
   type AnnotationAsset,
   type FillPlan,
   type FillSuggestion,
@@ -46,6 +48,8 @@ export default function FillPanel({ runId, projectId }: Props) {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
+  const [editingTarget, setEditingTarget] = useState<FillTarget | null | undefined>(undefined);
+  const [deletingTarget, setDeletingTarget] = useState<FillTarget | null>(null);
 
   const documents = useQuery({
     queryKey: ['fill-documents', projectId],
@@ -148,6 +152,17 @@ export default function FillPanel({ runId, projectId }: Props) {
     },
     onError: (err) => setError(apiError(err, '重建填写计划失败')),
   });
+  const removeTarget = useMutation({
+    mutationFn: async () => (await api.delete<FillPlan>(`/fill-targets/${deletingTarget!.id}`)).data,
+    onSuccess: async (result) => {
+      setDeletingTarget(null); setSelectedTargetId(''); setMessage('填写位置已移除，更新建议时不会重新添加');
+      queryClient.setQueryData(['fill-plan', runId, templateId], result);
+      await queryClient.invalidateQueries({ queryKey: ['checklist', runId] });
+      await queryClient.invalidateQueries({ queryKey: ['run', runId] });
+    },
+    onError: (err) => { setDeletingTarget(null); setError(apiError(err, '移除填写位置失败')); },
+  });
+  const renderedPages = templatePages.data?.filter((page) => !page.quality_flags.some((flag) => ['no_page_coordinates', 'spreadsheet_coordinates'].includes(flag))) ?? [];
 
   const groupedTargets = useMemo(() => {
     const groups = new Map<string, FillTarget[]>();
@@ -213,6 +228,7 @@ export default function FillPanel({ runId, projectId }: Props) {
           <Button variant="outlined" disabled={rebuild.isPending} onClick={() => rebuild.mutate()}>
             {rebuild.isPending ? '正在更新…' : '更新填写建议'}
           </Button>
+          <Button variant="outlined" disabled={!selectedPlan || !renderedPages.length} onClick={() => setEditingTarget(null)}>添加填写位置</Button>
         </Stack>
         <LinearProgress variant="determinate" value={total ? reviewed / total * 100 : 0} sx={{ mt: 2, height: 5, borderRadius: 1 }} />
       </Paper>
@@ -296,6 +312,7 @@ export default function FillPanel({ runId, projectId }: Props) {
                     <Button color="inherit" disabled={save.isPending} onClick={() => save.mutate({ suggestion: selectedSuggestion, value: draftValues[selectedSuggestion.id] ?? '', status: 'rejected' })}>暂不采用此项</Button>
                     {nextPending && <Button disabled={save.isPending} onClick={() => setSelectedTargetId(nextPending.id)}>下一处待处理</Button>}
                   </Stack>
+                  {selectedTarget && <Stack direction="row" gap={1}><Button size="small" disabled={!renderedPages.some((page) => page.id === selectedTarget.page_id)} onClick={() => setEditingTarget(selectedTarget)}>修正填写位置</Button><Button size="small" color="error" onClick={() => setDeletingTarget(selectedTarget)}>移除此位置</Button></Stack>}
                 </Stack>
               </Paper>
             )}
@@ -323,7 +340,7 @@ export default function FillPanel({ runId, projectId }: Props) {
               ) : (
                 <Box sx={{ p: 5, bgcolor: '#f0ece2', textAlign: 'center' }}>
                   <Typography color="text.secondary">
-                    该模板没有固定页面图，仍可在下方填写和复核；需要原页面标注图时请上传 PDF。
+                    该模板没有固定页面图，仍可在上方填写和复核；需要原页面标注图时请上传 PDF。
                   </Typography>
                 </Box>
               )}
@@ -332,6 +349,14 @@ export default function FillPanel({ runId, projectId }: Props) {
           </Stack>
         </Grid>
       </Grid></Box>
+      {editingTarget !== undefined && selectedPlan && <FillTargetEditor key={editingTarget?.id ?? 'new'} plan={selectedPlan} pages={renderedPages} target={editingTarget} onClose={() => setEditingTarget(undefined)} onSaved={async (result, label) => {
+        queryClient.setQueryData(['fill-plan', runId, templateId], result);
+        setSelectedTargetId(result.targets.find((target) => target.label === label)?.id ?? '');
+        setMessage('填写位置已保存，可继续输入填写内容');
+        await queryClient.invalidateQueries({ queryKey: ['checklist', runId] });
+        await queryClient.invalidateQueries({ queryKey: ['run', runId] });
+      }} />}
+      <ConfirmDialog open={Boolean(deletingTarget)} title="移除此填写位置？" description={`将移除「${deletingTarget?.label ?? ''}」及其建议内容和标注。原模板保持原样，更新建议时不会重新添加此位置。`} pending={removeTarget.isPending} onClose={() => setDeletingTarget(null)} onConfirm={() => removeTarget.mutate()} />
     </Stack>
   );
 }
@@ -346,12 +371,4 @@ function AnnotatedImage({ asset }: { asset: AnnotationAsset }) {
       />
     </Box>
   );
-}
-
-function apiError(error: unknown, fallback: string) {
-  if (typeof error === 'object' && error && 'response' in error) {
-    const detail = (error as { response?: { data?: { detail?: string } } }).response?.data?.detail;
-    if (detail) return detail;
-  }
-  return error instanceof Error ? error.message : fallback;
 }

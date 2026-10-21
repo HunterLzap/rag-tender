@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,7 @@ from app.models import (
     DecisionStatus,
     EvidenceFact,
     EvidenceItem,
+    EvidenceReviewStatus,
     ModelConfig,
     Project,
     Requirement,
@@ -28,23 +30,20 @@ async def decide_run(
     session: AsyncSession,
     run: AnalysisRun,
     *,
-    job_id: str,
+    job_id: str | None = None,
     config_id: str | None = None,
+    use_model: bool = True,
 ) -> dict[str, Any]:
     bid = await session.get(Bid, run.bid_id) if run.bid_id else None
     project = await session.get(Project, run.project_id)
+    deadline = (bid.bid_deadline if bid else None) or (project.bid_deadline if project else None)
+    timezone = ZoneInfo(project.timezone if project else "Asia/Shanghai")
+    if deadline and deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
     as_of = (
-        bid.as_of_date
-        if bid and bid.as_of_date
-        else (
-            bid.bid_deadline.date()
-            if bid and bid.bid_deadline
-            else (
-                project.bid_deadline.date()
-                if project and project.bid_deadline
-                else date.today()
-            )
-        )
+        bid.as_of_date if bid and bid.as_of_date
+        else deadline.astimezone(timezone).date() if deadline
+        else datetime.now(timezone).date()
     )
     requirements = (
         await session.execute(
@@ -82,13 +81,15 @@ async def decide_run(
                     select(EvidenceFact).where(EvidenceFact.evidence_id == best.evidence.id)
                 )
             ).scalars().all()
+            if best.evidence.review_status != EvidenceReviewStatus.VERIFIED:
+                facts = []
         model_assessment: str | None = None
         model_trace: dict[str, Any] = {}
         status, summary, trace, condition_results = decide_requirement(
             requirement, as_of=as_of, facts=facts
         )
         if (
-            status == DecisionStatus.NEEDS_REVIEW
+            use_model and status == DecisionStatus.NEEDS_REVIEW
             and best and best.score >= 0.25 and facts and model_cfg is not None
         ):
             assessment = await structured_text(
@@ -135,12 +136,13 @@ async def decide_run(
         decision.condition_results = condition_results
         decision.stale = False
         counts[status.value] += 1
-        await mark_progress(
-            session,
-            job_id,
-            progress=70 + int((index + 1) / max(total, 1) * 20),
-            stage=f"判定 {index + 1}/{total}",
-        )
+        if job_id:
+            await mark_progress(
+                session,
+                job_id,
+                progress=70 + int((index + 1) / max(total, 1) * 20),
+                stage=f"判定 {index + 1}/{total}",
+            )
     run.status = (
         AnalysisStatus.NEEDS_REVIEW
         if counts[DecisionStatus.NEEDS_REVIEW.value]
@@ -197,7 +199,7 @@ async def enrich_evidence_facts(
                 currency=payload.get("currency"),
                 holder=evidence.holder,
                 extraction_method="manual",
-                review_status="unreviewed",
+                review_status=evidence.review_status,
             )
         elif column == "value_date":
             try:
@@ -210,7 +212,7 @@ async def enrich_evidence_facts(
                 value_date=parsed,
                 holder=evidence.holder,
                 extraction_method="manual",
-                review_status="unreviewed",
+                review_status=evidence.review_status,
             )
         else:
             fact = EvidenceFact(
@@ -219,7 +221,7 @@ async def enrich_evidence_facts(
                 value_text=str(value),
                 holder=evidence.holder,
                 extraction_method="manual",
-                review_status="unreviewed",
+                review_status=evidence.review_status,
             )
         session.add(fact)
         facts.append(fact)
@@ -230,7 +232,7 @@ async def enrich_evidence_facts(
             value_date=evidence.valid_until,
             holder=evidence.holder,
             extraction_method="manual",
-            review_status="unreviewed",
+            review_status=evidence.review_status,
         )
         session.add(fact)
         facts.append(fact)

@@ -159,13 +159,23 @@ def _number_rule(condition: dict[str, Any], facts: list[Any]) -> RuleResult:
     operator = str(condition.get("operator") or ">=")
     required = Decimal(str(condition.get("value")))
     unit = str(condition.get("unit") or "")
-    values = [
-        fact.value_number
-        for fact in _facts_by_key(facts).get(key, [])
-        if fact.value_number is not None
-    ]
+    values = []
+    money_units = {"元": Decimal(1), "万元": Decimal(10000),
+                   "万": Decimal(10000), "亿元": Decimal(100000000)}
+    for fact in _facts_by_key(facts).get(key, []):
+        if fact.value_number is None:
+            continue
+        value = fact.value_number
+        actual_unit = getattr(fact, "unit", None) or ""
+        if unit and actual_unit != unit:
+            if unit not in money_units or actual_unit not in money_units:
+                continue
+            value = value * money_units[actual_unit] / money_units[unit]
+        values.append(value)
     if not values:
-        return RuleResult(key, "unknown", f"{operator}{required}{unit}", None, "未找到数值字段")
+        return RuleResult(
+            key, "unknown", f"{operator}{required}{unit}", None, "未找到带明确单位的可比较数值字段"
+        )
     actual = max(values)
     passed = {
         ">=": actual >= required,
@@ -212,6 +222,10 @@ def _date_rule(condition: dict[str, Any], facts: list[Any], as_of: date) -> Rule
 
 def _material_rule(condition: dict[str, Any], facts: list[Any]) -> RuleResult:
     required = condition.get("materials") or []
+    if not required:
+        return RuleResult(
+            "material_complete", "unknown", None, None, "提交材料需逐项人工核对"
+        )
     existing = {fact.fact_key for fact in facts}
     missing = [item for item in required if item not in existing]
     if missing:

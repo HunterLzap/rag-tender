@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import EvidenceFact, EvidenceItem, EvidenceStatus
+from app.models import EvidenceFact, EvidenceItem, EvidenceReviewStatus, EvidenceStatus
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,7 @@ async def recall_evidence(
             select(EvidenceItem).where(
                 EvidenceItem.kind == kind,
                 EvidenceItem.status == EvidenceStatus.ACTIVE,
+                EvidenceItem.review_status != EvidenceReviewStatus.REJECTED,
                 (EvidenceItem.project_id == project_id)
                 | (EvidenceItem.organization_id.is_not(None)),
             )

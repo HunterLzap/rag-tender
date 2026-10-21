@@ -70,6 +70,12 @@ export interface PageItem {
   parse_mode: string;
   quality_flags: string[];
   native_locator: Record<string, unknown>;
+  blocks?: Array<{
+    id: string; kind: string; text: string; reading_order: number;
+    cells: Array<{
+      id: string; row_index: number; col_index: number; row_span: number; col_span: number; text: string;
+    }>;
+  }>;
 }
 
 export interface SourceSpan {

@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.db import get_session
 from app.models import (
     AnalysisRun,
+    AnalysisStatus,
     AnnotationAsset,
     Bid,
     Block,
@@ -84,6 +85,7 @@ from app.services.fill import (
     rebuild_fill_plan,
     render_annotations,
 )
+from app.services.freshness import mark_project_stale
 from app.services.jobs import enqueue, request_cancel
 from app.services.model_gateway import test_model
 from app.storage import store_upload
@@ -107,10 +109,11 @@ def _document_read(document: Document) -> DocumentRead:
         page_count=document.page_count,
         current_revision_id=document.current_revision_id,
         current_page_count=document.page_count,
-        parse_status=(
+        parse_status=(document.metadata_json or {}).get("parse_status") or (
             "needs_review" if (document.metadata_json or {}).get("pages_needing_review")
             else "completed" if document.current_revision_id else "pending"
         ),
+        parse_error=(document.metadata_json or {}).get("parse_error"),
         supersedes_id=document.supersedes_id,
         created_at=document.created_at,
     )
@@ -180,7 +183,10 @@ async def update_project(
     project = await session.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "项目不存在")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "bid_deadline" in data and data["bid_deadline"] != project.bid_deadline:
+        await mark_project_stale(session, project_id)
+    for key, value in data.items():
         setattr(project, key, value)
     await session.commit()
     return ProjectRead(**project.__dict__)
@@ -223,10 +229,15 @@ async def update_bid(
     if bid is None:
         raise HTTPException(404, "标段不存在")
     data = payload.model_dump(exclude_unset=True)
+    if any(
+        key in data and data[key] != getattr(bid, key)
+        for key in ("bid_deadline", "as_of_date", "bidder_name")
+    ):
+        await mark_project_stale(session, bid.project_id)
     for key, value in data.items():
         setattr(bid, key, value)
     project = await session.get(Project, bid.project_id)
-    if project is not None and data.get("bid_deadline") is not None:
+    if project is not None and "bid_deadline" in data:
         project.bid_deadline = data["bid_deadline"]
     await session.commit()
     return bid
@@ -242,7 +253,11 @@ async def upload_document(
     project = await session.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "项目不存在")
+    if Path(file.filename or "").suffix.lower() not in {".pdf", ".doc", ".docx", ".xlsx", ".csv"}:
+        raise HTTPException(400, "请选择 PDF、DOC、DOCX、XLSX 或 CSV 文件")
     content = await file.read()
+    if not content:
+        raise HTTPException(400, "文件为空，请选择有内容的文件")
     if len(content) > get_settings().max_upload_bytes:
         raise HTTPException(413, "文件超过上传大小限制")
     stored = store_upload(file.filename or "document.bin", content)
@@ -265,6 +280,8 @@ async def upload_document(
         file_size=stored.size,
     )
     session.add(document)
+    if role in {DocumentRole.TENDER, DocumentRole.ADDENDUM, DocumentRole.QA}:
+        await mark_project_stale(session, project_id)
     await session.flush()
     await enqueue(
         session,
@@ -349,6 +366,41 @@ async def create_analysis_run(
     project = await session.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "项目不存在")
+    documents = (
+        await session.execute(
+            select(Document).where(
+                Document.project_id == project_id,
+                Document.role.in_(
+                    [DocumentRole.TENDER, DocumentRole.ADDENDUM, DocumentRole.QA]
+                ),
+            )
+        )
+    ).scalars().all()
+    if not documents or any(not document.current_revision_id for document in documents):
+        raise HTTPException(400, "请先完成全部招标、补遗和答疑文件的解析")
+    if payload.mode == "manual":
+        run = AnalysisRun(
+            project_id=project_id,
+            status=AnalysisStatus.NEEDS_REVIEW,
+            stage="manual_review",
+            progress=100,
+            input_snapshot=[
+                {
+                    "document_id": document.id, "revision_id": document.current_revision_id,
+                    "text_version": (document.metadata_json or {}).get("text_version", 0),
+                }
+                for document in documents
+            ],
+            model_snapshot={"execution_mode": "manual"},
+            coverage_notes=["人工工作台未执行模型提取，请对照原文核验要求是否完整"],
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+        )
+        session.add(run)
+        await session.flush()
+        await build_checklist(session, run.id)
+        await session.commit()
+        return AnalysisRunRead(**run.__dict__)
     model_config = None
     if payload.model_config_id:
         model_config = await session.get(ModelConfig, payload.model_config_id)
@@ -370,19 +422,6 @@ async def create_analysis_run(
             raise HTTPException(400, "请先在模型配置页保存并启用一个模型")
     # Tests and offline fixture mode intentionally exercise extraction through a mock.
     # Production startup uses migrations and requires a model configuration.
-    documents = (
-        await session.execute(
-            select(Document).where(
-                Document.project_id == project_id,
-                Document.current_revision_id.is_not(None),
-                Document.role.in_(
-                    [DocumentRole.TENDER, DocumentRole.ADDENDUM, DocumentRole.QA]
-                ),
-            )
-        )
-    ).scalars().all()
-    if not documents:
-        raise HTTPException(400, "项目还没有可分析的文档")
     bid = (
         await session.execute(
             select(Bid).where(Bid.project_id == project_id).order_by(Bid.created_at.desc()).limit(1)
@@ -483,8 +522,13 @@ async def update_requirement(
     requirement = await session.get(Requirement, requirement_id)
     if requirement is None:
         raise HTTPException(404, "要求不存在")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    for key, value in data.items():
         setattr(requirement, key, value)
+    if "statement" in data and "condition_json" not in data:
+        from app.domain.rules import extract_condition
+
+        requirement.condition_json = extract_condition(requirement.statement, requirement.category)
     decision = (
         await session.execute(
             select(Decision).where(
@@ -495,9 +539,20 @@ async def update_requirement(
     ).scalar_one_or_none()
     if decision is not None:
         decision.stale = True
-        decision.summary = f"{decision.summary}（要求已人工调整，需重新判定）"
+        decision.status = DecisionStatus.NEEDS_REVIEW
+        decision.summary = "要求已人工调整，请重新核对并保存复核结论"
+    run = await session.get(AnalysisRun, requirement.run_id)
+    if run and run.status == AnalysisStatus.COMPLETED:
+        run.status = AnalysisStatus.NEEDS_REVIEW
+    await build_checklist(session, requirement.run_id, reset_requirement_ids={requirement.id})
     await session.commit()
-    return requirement
+    return (
+        await session.execute(
+            select(Requirement).options(selectinload(Requirement.source_span))
+            .where(Requirement.id == requirement_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
 
 
 @router.get("/analysis-runs/{run_id}/decisions", response_model=list[DecisionRead])
@@ -523,8 +578,22 @@ async def create_review(
     decision = await session.get(Decision, decision_id)
     if decision is None:
         raise HTTPException(404, "判定不存在")
+    if payload.evidence_ids is not None:
+        run = await session.get(AnalysisRun, decision.run_id)
+        evidence_ids = set(payload.evidence_ids)
+        allowed = set((
+            await session.execute(select(EvidenceItem.id).where(
+                EvidenceItem.project_id == run.project_id,
+                EvidenceItem.id.in_(evidence_ids),
+            ))
+        ).scalars())
+        if allowed != evidence_ids:
+            raise HTTPException(400, "请选择当前项目的证据资料")
+        decision.evidence_ids = list(dict.fromkeys(payload.evidence_ids))
     previous = decision.status.value
     decision.status = payload.new_status
+    decision.stale = False
+    decision.summary = payload.reason
     review = ReviewRecord(
         decision_id=decision.id,
         reviewer=payload.reviewer,
@@ -535,7 +604,7 @@ async def create_review(
     )
     session.add(review)
     await session.flush()
-    await build_checklist(session, decision.run_id)
+    await build_checklist(session, decision.run_id, reset_requirement_ids={decision.requirement_id})
     await mark_run_complete_if_ready(session, decision.run_id)
     await session.commit()
     return review
@@ -597,6 +666,7 @@ async def create_evidence(
             )
         )
     await enrich_evidence_facts(session, evidence, payload.payload)
+    await mark_project_stale(session, project_id)
     await session.commit()
     return await _load_evidence(session, evidence.id)
 
@@ -613,20 +683,10 @@ async def update_evidence(
     data = payload.model_dump(exclude_unset=True)
     for key, value in data.items():
         setattr(evidence, key, value)
-    if "payload" in data or "valid_until" in data:
+    if any(key in data for key in ("payload", "valid_until", "holder", "review_status")):
         await session.execute(delete(EvidenceFact).where(EvidenceFact.evidence_id == evidence_id))
         await enrich_evidence_facts(session, evidence, evidence.payload)
-    await session.execute(
-        update(Decision).where(
-            Decision.run_id.in_(
-                select(AnalysisRun.id).where(AnalysisRun.project_id == evidence.project_id)
-            )
-        ).values(stale=True)
-    )
-    await session.execute(
-        update(AnalysisRun).where(AnalysisRun.project_id == evidence.project_id)
-        .values(status="stale")
-    )
+    await mark_project_stale(session, evidence.project_id)
     await session.commit()
     return await _load_evidence(session, evidence.id)
 
@@ -994,6 +1054,7 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
         await session.execute(
             select(Decision)
             .options(selectinload(Decision.requirement).selectinload(Requirement.source_span))
+            .options(selectinload(Decision.reviews))
             .where(Decision.run_id == run_id)
             .order_by(Decision.created_at)
         )
@@ -1004,26 +1065,57 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
         "met": "符合", "not_met": "不符合",
         "needs_review": "待人工复核", "not_applicable": "不适用",
     }
+    mode_label = (
+        "人工核对（未执行模型提取）"
+        if run.model_snapshot.get("execution_mode") == "manual" else "模型分析与人工复核"
+    )
+    status_labels = {
+        "completed": "已完成", "needs_review": "待人工复核",
+        "stale": "资料已更新，旧结论待重新核对", "failed": "分析未完成",
+    }
     lines = [
         "# 投标准备检查报告", "",
         f"项目：{project.name if project else '未命名项目'}",
         f"招标编号：{project.tender_no or '未填写' if project else '未填写'}",
+        f"工作方式：{mode_label}",
+        f"分析状态：{status_labels.get(run.status.value, '处理中')}",
         f"生成时间：{datetime.now(UTC).isoformat()}",
         "", "## 要求核对结果", "",
     ]
     for decision in decisions:
         summary[decision.status.value] += 1
         req = decision.requirement
+        span = req.source_span
+        source_document = await session.get(Document, span.document_id) if span else None
+        source_page = await session.get(Page, span.page_id) if span else None
         lines.extend(
             [
                 f"### {req.title}",
                 "",
                 f"- 结论：{decision_labels[decision.status.value]}",
                 f"- 说明：{decision.summary}",
+                f"- 来源：{source_document.filename if source_document else '缺失'}"
+                f" · 第 {source_page.page_index + 1 if source_page else '?'} 页",
+                f"- 结论有效性：{'待重新核对' if decision.stale else '当前记录'}",
                 f"- 原文：{req.source_span.quote if req.source_span else '缺失'}",
                 "",
             ]
         )
+        for review in sorted(decision.reviews, key=lambda item: item.created_at):
+            lines.append(
+                f"- 人工复核（{review.created_at.isoformat()}）："
+                f"{decision_labels.get(review.new_status, review.new_status)}；{review.reason}"
+            )
+        evidence = (await session.execute(
+            select(EvidenceItem).where(EvidenceItem.id.in_(decision.evidence_ids))
+        )).scalars().all()
+        for item in evidence:
+            lines.append(f"- 支持证据：{item.title}（{item.holder or '主体未填写'}）")
+        lines.append("")
+    if run.coverage_notes:
+        lines.extend([
+            "## 提取范围与人工核验", "", *[f"- {note}" for note in run.coverage_notes], "",
+        ])
     checklist = (
         await session.execute(select(ChecklistItem).where(ChecklistItem.run_id == run_id))
     ).scalars().all()
@@ -1036,8 +1128,10 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
         lines.append("暂无检查事项。")
     fill_rows = (
         await session.execute(
-            select(FillTarget, FillSuggestion)
+            select(FillTarget, FillSuggestion, Document, Page)
             .join(FillPlan, FillPlan.id == FillTarget.plan_id)
+            .join(Document, Document.id == FillPlan.document_id)
+            .join(Page, Page.id == FillTarget.page_id)
             .outerjoin(FillSuggestion, FillSuggestion.target_id == FillTarget.id)
             .where(FillPlan.run_id == run_id)
             .order_by(FillTarget.created_at)
@@ -1048,10 +1142,14 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
         "accepted": "已确认", "edited": "已修改", "proposed": "待确认",
         "missing_evidence": "待补充", "rejected": "未采用",
     }
-    for target, suggestion in fill_rows:
+    for target, suggestion, document, page in fill_rows:
         value = suggestion.value if suggestion and suggestion.value else "尚未填写"
         status = suggestion_labels.get(suggestion.status, "待补充") if suggestion else "待补充"
-        lines.extend([f"### {target.label}", "", f"- 状态：{status}", f"- 内容：{value}", ""])
+        lines.extend([
+            f"### {target.label}", "",
+            f"- 位置：{document.filename} · 第 {page.page_index + 1} 页",
+            f"- 状态：{status}", f"- 内容：{value}", "",
+        ])
     if not fill_rows:
         lines.append("尚未生成填写建议。")
     return ReportRead(

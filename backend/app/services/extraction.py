@@ -1,7 +1,9 @@
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
@@ -23,12 +25,19 @@ from app.storage import sha256_text
 
 
 class ExtractedRequirement(BaseModel):
-    category: str = "other"
-    evaluation_stage: str = "qualification"
-    evaluation_type: str = "binary"
-    obligation: str = "mandatory"
-    consequence: str = "rejection"
-    handling_mode: str = "evidence"
+    category: Literal[
+        "qualification", "personnel", "performance", "financial",
+        "technical", "commercial", "submission", "other",
+    ] = "other"
+    evaluation_stage: Literal[
+        "qualification", "compliance", "technical", "commercial",
+    ] = "qualification"
+    evaluation_type: Literal["binary", "score", "submission", "manual"] = "binary"
+    obligation: Literal["mandatory", "scored", "optional", "informational"] = "mandatory"
+    consequence: Literal["rejection", "scoring", "reminder", "none"] = "rejection"
+    handling_mode: Literal[
+        "evidence", "submission", "technical", "commercial", "todo", "manual", "fill",
+    ] = "evidence"
     title: str
     statement: str
     block_id: str
@@ -64,6 +73,13 @@ EXTRACTION_SYSTEM = """你是招投标文件要求提取器。
 
 MAX_BLOCKS_PER_BATCH = 8
 MAX_BATCH_CHARS = 6000
+
+
+@dataclass(frozen=True)
+class BlockFragment:
+    id: str
+    kind: str
+    text: str
 
 
 def content_fingerprint(category: str, statement: str) -> str:
@@ -103,7 +119,10 @@ async def extract_requirements_for_run(
         ).scalars()
     )
     run.input_snapshot = [
-        {"document_id": document.id, "revision_id": document.current_revision_id}
+        {
+            "document_id": document.id, "revision_id": document.current_revision_id,
+            "text_version": (document.metadata_json or {}).get("text_version", 0),
+        }
         for document in (
             await session.execute(
                 select(Document).where(Document.project_id == run.project_id)
@@ -117,7 +136,9 @@ async def extract_requirements_for_run(
             )
         blocks = (
             await session.execute(
-                select(Block).where(Block.page_id == page.id).order_by(Block.reading_order)
+                select(Block).where(
+                    Block.page_id == page.id, Block.kind != "historical_text",
+                ).order_by(Block.reading_order)
             )
         ).scalars().all()
         if not blocks:
@@ -199,11 +220,26 @@ async def extract_requirements_for_run(
     return created, coverage_notes
 
 
-def _block_batches(blocks: list[Block]) -> list[list[Block]]:
-    batches: list[list[Block]] = []
-    current: list[Block] = []
+def _block_batches(blocks: list[Block]) -> list[list[Block | BlockFragment]]:
+    batches: list[list[Block | BlockFragment]] = []
+    current: list[Block | BlockFragment] = []
     current_chars = 0
+    fragments: list[Block | BlockFragment] = []
     for block in blocks:
+        if not block.text.strip():
+            continue
+        if len(block.text) <= MAX_BATCH_CHARS:
+            fragments.append(block)
+            continue
+        # Preserve the original block id so quotes still validate against the full source.
+        start = 0
+        while start < len(block.text):
+            end = min(start + MAX_BATCH_CHARS, len(block.text))
+            fragments.append(BlockFragment(block.id, block.kind, block.text[start:end]))
+            if end == len(block.text):
+                break
+            start = end - 200
+    for block in fragments:
         block_chars = len(block.text)
         if current and (
             len(current) >= MAX_BLOCKS_PER_BATCH

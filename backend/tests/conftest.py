@@ -19,13 +19,22 @@ async def session(tmp_path: Path):
 
 
 @pytest_asyncio.fixture(autouse=True)
-def isolated_data_dir(monkeypatch, tmp_path):
+async def isolated_data_dir(monkeypatch, tmp_path):
+    from app import db
+
+    if db._engine is not None:
+        await db._engine.dispose()
+        db._engine = None
     monkeypatch.setenv("TENDER_DATA_DIR", str(tmp_path / "runtime-data"))
     monkeypatch.setenv("TENDER_LIVE_MODEL_CALLS", "false")
+    monkeypatch.setenv("TENDER_AUTO_CREATE_SCHEMA", "true")
     from app.config import get_settings
 
     get_settings.cache_clear()
     yield
+    if db._engine is not None:
+        await db._engine.dispose()
+        db._engine = None
     get_settings.cache_clear()
 
 

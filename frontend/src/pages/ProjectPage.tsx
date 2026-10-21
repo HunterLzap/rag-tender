@@ -40,6 +40,8 @@ export default function ProjectPage() {
   const [docRole, setDocRole] = useState('');
   const [preview, setPreview] = useState<DocumentItem | null>(null);
   const [previewPage, setPreviewPage] = useState('');
+  const [textOpen, setTextOpen] = useState(false);
+  const [pageText, setPageText] = useState('');
   const [deleting, setDeleting] = useState<{ path: string; title: string; description: string } | null>(null);
   const project = useQuery({ queryKey: ['project', projectId], queryFn: async () => (await api.get<Project>(`/projects/${projectId}`)).data });
   const runtime = useQuery({ queryKey: ['runtime'], queryFn: async () => (await api.get<{ live_model_calls: boolean }>('/health')).data });
@@ -57,9 +59,24 @@ export default function ProjectPage() {
     if (location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView({ behavior: 'auto', block: 'start' });
   }, [location.hash, project.data?.id]);
   const analyze = useMutation({
-    mutationFn: async () => (await api.post<AnalysisRun>(`/projects/${projectId}/analysis-runs`, {})).data,
+    mutationFn: async (mode: 'model' | 'manual') => (await api.post<AnalysisRun>(`/projects/${projectId}/analysis-runs`, { mode })).data,
     onSuccess: async (run) => { await refresh(); navigate(`/runs/${run.id}`); },
     onError: (err) => setError(apiError(err, '创建分析任务失败')),
+  });
+  const reparse = useMutation({
+    mutationFn: async (doc: DocumentItem) => api.post(`/documents/${doc.id}/reparse`),
+    onSuccess: async () => { setMessage('已重新加入解析队列'); await refresh(); },
+    onError: (err) => setError(apiError(err, '重新解析失败')),
+  });
+  const correctText = useMutation({
+    mutationFn: async () => api.put(`/pages/${page!.id}/text`, { text: pageText }),
+    onSuccess: async () => {
+      setTextOpen(false); setMessage('本页文字已人工校正；已有结论已标记待重新核对');
+      await queryClient.invalidateQueries({ queryKey: ['document-pages', preview?.id] });
+      await queryClient.invalidateQueries({ queryKey: ['source-spans', page?.id] });
+      await refresh();
+    },
+    onError: (err) => setError(apiError(err, '保存人工校正失败')),
   });
   const saveInfo = useMutation({
     mutationFn: async () => {
@@ -110,7 +127,8 @@ export default function ProjectPage() {
   const parsedTenders = tenders.filter((doc) => doc.current_revision_id);
   const templates = documents.data?.filter((doc) => doc.role === 'template') ?? [];
   const activeRun = runs.data?.[0];
-  const canAnalyze = parsedTenders.length > 0 && !tenders.some((doc) => !doc.current_revision_id) && runtime.data?.live_model_calls && !['draft', 'running'].includes(activeRun?.status ?? '');
+  const materialsReady = parsedTenders.length > 0 && !tenders.some((doc) => !doc.current_revision_id || ['queued', 'running', 'failed'].includes(doc.parse_status));
+  const canAnalyze = materialsReady && runtime.data?.live_model_calls && !['draft', 'running'].includes(activeRun?.status ?? '');
   if (project.isLoading) return <EmptyState title="正在加载项目信息" loading />;
   if (project.isError) return <Alert severity="error">项目不存在或暂时无法加载。<Button component={Link} to="/">返回项目列表</Button></Alert>;
 
@@ -134,9 +152,10 @@ export default function ProjectPage() {
             <Stack divider={<Divider flexItem />}>
               {!documents.data?.length && <EmptyState title="还没有项目文件" description="请选择「招标文件」并上传采购文件，系统会自动解析页码、原文和表格。" />}
               {documents.data?.map((doc) => <Box key={doc.id} sx={{ px: 2.5, py: 2 }}>
-                <Stack direction="row" justifyContent="space-between" gap={1}><Typography fontWeight={600} sx={{ overflowWrap: 'anywhere' }}>{doc.filename}</Typography><StatusChip status={doc.parse_status} label={doc.parse_status === 'completed' ? '解析完成' : doc.parse_status === 'needs_review' ? '含待复核页' : '解析中'} /></Stack>
+                <Stack direction="row" justifyContent="space-between" gap={1}><Typography fontWeight={600} sx={{ overflowWrap: 'anywhere' }}>{doc.filename}</Typography><StatusChip status={doc.parse_status} label={doc.parse_status === 'completed' ? '解析完成' : doc.parse_status === 'needs_review' ? '含待复核页' : undefined} /></Stack>
                 <Typography variant="caption" color="text.secondary">{roleLabels[doc.role]} · {doc.current_revision_id ? `${doc.page_count} 页` : '等待解析'} · {formatBytes(doc.file_size)}</Typography>
-                <Stack direction="row" gap={0.5} sx={{ mt: 1 }}><Button size="small" disabled={!doc.current_revision_id} onClick={() => { setPreview(doc); setPreviewPage(''); }}>查看原文</Button><Button size="small" href={`/api/v2/documents/${doc.id}/file`}>下载</Button><Button size="small" color="inherit" onClick={() => { setEditingDoc(doc); setDocName(doc.filename); setDocRole(doc.role); setError(''); }}>编辑</Button><Button size="small" color="error" onClick={() => setDeleting({ path: `/documents/${doc.id}`, title: '从项目中移除文件？', description: `将移除「${doc.filename}」。被分析或证据引用的文件，需要先删除相关记录。` })}>删除</Button></Stack>
+                {doc.parse_error && <Alert severity={doc.parse_status === 'failed' ? 'error' : 'warning'} sx={{ mt: 1 }}>{doc.parse_error}</Alert>}
+                <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 1 }}><Button size="small" disabled={!doc.current_revision_id} onClick={() => { setPreview(doc); setPreviewPage(''); }}>查看原文</Button><Button size="small" href={`/api/v2/documents/${doc.id}/file`}>下载</Button><Button size="small" color="inherit" onClick={() => { setEditingDoc(doc); setDocName(doc.filename); setDocRole(doc.role); setError(''); }}>编辑</Button>{['failed', 'canceled', 'needs_review'].includes(doc.parse_status) && <Button size="small" disabled={reparse.isPending} onClick={() => reparse.mutate(doc)}>重新解析</Button>}<Button size="small" color="error" onClick={() => setDeleting({ path: `/documents/${doc.id}`, title: '从项目中移除文件？', description: `将移除「${doc.filename}」。被分析或证据引用的文件，需要先删除相关记录。` })}>删除</Button></Stack>
               </Box>)}
             </Stack>
           </Paper>
@@ -146,7 +165,9 @@ export default function ProjectPage() {
             <Paper variant="outlined" sx={{ p: 2.5 }}><Typography variant="h6" sx={{ mb: 2 }}>准备进度</Typography><Stack spacing={1.3}><ReadyItem label={`招标文件：${parsedTenders.length ? `已解析 ${parsedTenders.reduce((sum, doc) => sum + doc.page_count, 0)} 页` : '待上传 / 解析'}`} ready={Boolean(parsedTenders.length)} /><ReadyItem label={`投标模板：${templates.length ? `${templates.length} 份` : '需要填写建议时上传'}`} ready={Boolean(templates.length)} /><ReadyItem label={`投标信息：${bids.data?.[0]?.bid_deadline || project.data?.bid_deadline ? '已设置截止日' : '待补充截止日'}`} ready={Boolean(bids.data?.[0]?.bid_deadline || project.data?.bid_deadline)} /><ReadyItem label={`填写资料：${values.data?.length ?? 0} 项`} ready={Boolean(values.data?.length)} /></Stack>
               <Divider sx={{ my: 2 }} />
               {runtime.data && !runtime.data.live_model_calls && <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>当前为离线模式，可准备资料和查看已有结果，真实模型分析保持关闭。</Typography>}
-              <Button fullWidth variant={activeRun ? 'outlined' : 'contained'} disabled={!canAnalyze || analyze.isPending} onClick={() => analyze.mutate()}>{analyze.isPending ? '正在创建分析…' : activeRun ? '重新分析招标文件' : '开始分析招标文件'}</Button>
+              <Button fullWidth variant={activeRun ? 'outlined' : 'contained'} disabled={!canAnalyze || analyze.isPending} onClick={() => analyze.mutate('model')}>{analyze.isPending ? '正在创建工作台…' : activeRun ? '重新分析招标文件' : '开始分析招标文件'}</Button>
+              <Button fullWidth variant="outlined" sx={{ mt: 1 }} disabled={!materialsReady || analyze.isPending} onClick={() => analyze.mutate('manual')}>新建人工核对与填写</Button>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>人工工作台可补充要求、复核证据和填写模板，全程不调用模型。</Typography>
               {!parsedTenders.length && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>上传并解析招标文件后，即可开始分析。</Typography>}
             </Paper>
             <Paper variant="outlined" sx={{ p: 2.5 }}><Stack direction="row" justifyContent="space-between" alignItems="center"><Typography variant="h6">投标信息</Typography><Button size="small" onClick={openInfo}>编辑</Button></Stack><Typography sx={{ mt: 1.5 }}>{bids.data?.[0]?.bidder_name || project.data?.bidder_name || '投标人待补充'}</Typography><Typography variant="body2" color="text.secondary">截止：{formatDate(bids.data?.[0]?.bid_deadline ?? project.data?.bid_deadline)}</Typography><Typography variant="caption" color="text.secondary">用于核验资质和证书是否在投标时有效。</Typography></Paper>
@@ -170,7 +191,8 @@ export default function ProjectPage() {
       <Dialog open={infoOpen} onClose={() => setInfoOpen(false)} fullWidth maxWidth="sm"><DialogTitle>编辑项目信息</DialogTitle><DialogContent><Stack spacing={2.5} sx={{ pt: 1 }}>{error && <Alert severity="error">{error}</Alert>}<TextField required label="项目名称" value={projectName} onChange={(event) => setProjectName(event.target.value)} /><TextField label="招标编号（选填）" value={tenderNo} onChange={(event) => setTenderNo(event.target.value)} /><TextField label="投标人名称" value={bidderName} onChange={(event) => setBidderName(event.target.value)} /><TextField label="投标截止时间" type="datetime-local" value={bidDeadline} onChange={(event) => setBidDeadline(event.target.value)} InputLabelProps={{ shrink: true }} helperText="用于核验投标时的证书有效期；请填写招标文件规定的截止时间。" /></Stack></DialogContent><DialogActions><Button onClick={() => setInfoOpen(false)}>取消</Button><Button variant="contained" disabled={!projectName.trim() || saveInfo.isPending} onClick={() => saveInfo.mutate()}>保存修改</Button></DialogActions></Dialog>
       <Dialog open={valueOpen} onClose={() => setValueOpen(false)} fullWidth maxWidth="sm"><DialogTitle>{editingValue ? '编辑填写资料' : '新增填写资料'}</DialogTitle><DialogContent><Stack spacing={2.5} sx={{ pt: 1 }}><Typography color="text.secondary">填写已确定的真实内容，供模板填写建议使用。</Typography>{error && <Alert severity="error">{error}</Alert>}<TextField required label="模板字段名称" placeholder="例如：投标人名称、设备名称、交货期" value={valueLabel} onChange={(event) => setValueLabel(event.target.value)} helperText="与模板中的字段名称保持一致，便于自动匹配。" /><TextField required label="准备填写的内容" multiline minRows={3} value={valueText} onChange={(event) => setValueText(event.target.value)} /></Stack></DialogContent><DialogActions><Button onClick={() => setValueOpen(false)}>取消</Button><Button variant="contained" disabled={!valueLabel.trim() || !valueText.trim() || saveValue.isPending} onClick={() => saveValue.mutate()}>保存资料</Button></DialogActions></Dialog>
       <Dialog open={Boolean(editingDoc)} onClose={() => setEditingDoc(null)} fullWidth maxWidth="sm"><DialogTitle>编辑文件信息</DialogTitle><DialogContent><Stack spacing={2.5} sx={{ pt: 1 }}>{error && <Alert severity="error">{error}</Alert>}<TextField label="文件名称" required value={docName} onChange={(event) => setDocName(event.target.value)} /><TextField label="文件用途" select value={docRole} onChange={(event) => setDocRole(event.target.value)} helperText="修改用途后，已有分析可能需要重新核验。">{Object.entries(roleLabels).map(([key, label]) => <MenuItem key={key} value={key}>{label}</MenuItem>)}</TextField></Stack></DialogContent><DialogActions><Button onClick={() => setEditingDoc(null)}>取消</Button><Button variant="contained" disabled={!docName.trim() || saveDoc.isPending} onClick={() => saveDoc.mutate()}>保存修改</Button></DialogActions></Dialog>
-      <Dialog open={Boolean(preview)} onClose={() => setPreview(null)} fullWidth maxWidth="md"><DialogTitle>{preview?.filename}</DialogTitle><DialogContent><Stack spacing={2}>{previewPages.isLoading ? <EmptyState title="正在加载原文" loading /> : page ? <><TextField select label="页码" value={page.id} onChange={(event) => setPreviewPage(event.target.value)}>{previewPages.data?.map((item) => <MenuItem key={item.id} value={item.id}>第 {item.page_index + 1} 页{item.printed_label ? ` · ${item.printed_label}` : ''}</MenuItem>)}</TextField><PageViewer page={page} /></> : <EmptyState title="原文尚未就绪" description="请等待解析完成后重新查看。" />}</Stack></DialogContent><DialogActions><Button href={`/api/v2/documents/${preview?.id}/file`}>下载原文件</Button><Button onClick={() => setPreview(null)}>关闭</Button></DialogActions></Dialog>
+      <Dialog open={Boolean(preview)} onClose={() => setPreview(null)} fullWidth maxWidth="md"><DialogTitle>{preview?.filename}</DialogTitle><DialogContent><Stack spacing={2}>{previewPages.isLoading ? <EmptyState title="正在加载原文" loading /> : page ? <><TextField select label="页码" value={page.id} onChange={(event) => setPreviewPage(event.target.value)}>{previewPages.data?.map((item) => <MenuItem key={item.id} value={item.id}>第 {item.page_index + 1} 页{item.printed_label ? ` · ${item.printed_label}` : ''}</MenuItem>)}</TextField><PageViewer page={page} /></> : <EmptyState title="原文尚未就绪" description="请等待解析完成后重新查看。" />}</Stack></DialogContent><DialogActions>{page && !page.quality_flags.some((flag) => ['no_page_coordinates', 'spreadsheet_coordinates'].includes(flag)) && <Button onClick={() => { setPageText(page.text); setError(''); setTextOpen(true); }}>人工校正本页文字</Button>}<Button href={`/api/v2/documents/${preview?.id}/file`}>下载原文件</Button><Button onClick={() => setPreview(null)}>关闭</Button></DialogActions></Dialog>
+      <Dialog open={textOpen} onClose={() => setTextOpen(false)} fullWidth maxWidth="md"><DialogTitle>人工校正 · 第 {(page?.page_index ?? 0) + 1} 页</DialogTitle><DialogContent><Stack spacing={2} sx={{ pt: 1 }}><Alert severity="info">请对照原页输入完整、真实的文字。保存后可用作要求或证据的来源；文字只定位到整页，精确填写位置请在模板中手工框选。</Alert>{error && <Alert severity="error">{error}</Alert>}<TextField label="已核实的本页文字" multiline minRows={12} value={pageText} onChange={(event) => setPageText(event.target.value)} /></Stack></DialogContent><DialogActions><Button onClick={() => setTextOpen(false)}>取消</Button><Button variant="contained" disabled={!pageText.trim() || correctText.isPending} onClick={() => correctText.mutate()}>保存人工校正</Button></DialogActions></Dialog>
       <ConfirmDialog open={Boolean(deleting)} title={deleting?.title ?? ''} description={deleting?.description ?? ''} pending={remove.isPending} onClose={() => setDeleting(null)} onConfirm={() => remove.mutate()} />
     </Stack>
   );

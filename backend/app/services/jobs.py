@@ -9,7 +9,7 @@ from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import get_engine, utcnow
-from app.models import AnalysisRun, AnalysisStatus, Job, JobStatus
+from app.models import AnalysisRun, AnalysisStatus, Document, Job, JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +164,13 @@ async def fail_exhausted_jobs(session: AsyncSession) -> int:
                     finished_at=now,
                 )
             )
+        elif kind == "parse_document":
+            document = await session.get(Document, payload.get("document_id"))
+            if document:
+                document.metadata_json = {
+                    **(document.metadata_json or {}), "parse_status": "failed",
+                    "parse_error": "解析任务超时，请手动重试",
+                }
     await session.commit()
     return len(failed)
 
@@ -184,6 +191,13 @@ async def request_cancel(session: AsyncSession, job_id: str) -> Job:
                 run.stage = "analysis_canceled"
                 run.error = "任务已取消"
                 run.finished_at = utcnow()
+        elif job.kind == "parse_document":
+            document = await session.get(Document, job.payload.get("document_id"))
+            if document:
+                document.metadata_json = {
+                    **(document.metadata_json or {}), "parse_status": "canceled",
+                    "parse_error": "解析任务已取消",
+                }
     await session.commit()
     return job
 
@@ -246,6 +260,14 @@ async def _process_one(session: AsyncSession, job: Job) -> None:
                 run.stage = "analysis_canceled" if canceled else "analysis_failed"
                 run.error = f"{type(exc).__name__}: {exc}"[:4000]
                 run.finished_at = utcnow()
+        elif fresh.kind == "parse_document":
+            document = await session.get(Document, fresh.payload.get("document_id"))
+            if document:
+                document.metadata_json = {
+                    **(document.metadata_json or {}),
+                    "parse_status": "canceled" if canceled else "queued" if retry else "failed",
+                    "parse_error": f"{type(exc).__name__}: {exc}"[:2000],
+                }
         await session.execute(
             update(Job)
             .where(Job.id == job_id)

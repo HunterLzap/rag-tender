@@ -14,6 +14,7 @@ from app.models import (
     Document,
     FillPlan,
     FillSlot,
+    FillSlotStatus,
     FillSuggestion,
     FillTarget,
     FillTargetKind,
@@ -232,7 +233,8 @@ async def create_fill_plan(
     slots = (
         await session.execute(
             select(FillSlot).where(
-                FillSlot.template_revision_id == template_document.current_revision_id
+                FillSlot.template_revision_id == template_document.current_revision_id,
+                FillSlot.status != FillSlotStatus.IGNORED,
             )
         )
     ).scalars().all()
@@ -569,9 +571,12 @@ def _match_response_value(label: str, values: list[ResponseValue]) -> ResponseVa
     normalized = re.sub(r"[\s:：]", "", label)
     if not normalized:
         return None
-    for value in values:
-        if normalized in {value.key, re.sub(r"[\s:：]", "", value.label)}:
-            return value
+    exact = [
+        value for value in values
+        if normalized in {value.key, re.sub(r"[\s:：]", "", value.label)}
+    ]
+    if exact:
+        return exact[0] if len(exact) == 1 else None
     candidates = [
         value for value in values
         if normalized in re.sub(r"\s+", "", value.label) or value.key in normalized

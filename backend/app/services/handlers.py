@@ -35,6 +35,9 @@ async def parse_document_job(session: AsyncSession, job: Job) -> dict[str, Any]:
     document = await session.get(Document, document_id)
     if document is None:
         raise RuntimeError("文档不存在")
+    document.metadata_json = {
+        **(document.metadata_json or {}), "parse_status": "running", "parse_error": None,
+    }
     await mark_progress(session, job.id, progress=5, stage="正在解析文档")
     parsed = await asyncio.to_thread(
         parse_document,
@@ -111,6 +114,8 @@ async def parse_document_job(session: AsyncSession, job: Job) -> dict[str, Any]:
         **(document.metadata_json or {}),
         "last_parsed_revision": revision.id,
         "pages_needing_review": review_pages,
+        "parse_status": "needs_review" if review_pages else "completed",
+        "parse_error": None,
     }
     await session.commit()
     await mark_progress(session, job.id, progress=95, stage="文档解析完成")

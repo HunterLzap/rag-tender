@@ -49,6 +49,15 @@ def test_project_document_evidence_and_response_crud(empty_table_pdf):
         )
         assert edited.status_code == 200, edited.text
         assert [fact["value_text"] for fact in edited.json()["facts"]] == ["Updated certificate"]
+        verified = client.patch(
+            f"/api/v2/evidence/{evidence_id}",
+            json={"holder": "Verified holder", "review_status": "verified"},
+        )
+        assert verified.status_code == 200, verified.text
+        assert all(
+            fact["holder"] == "Verified holder" and fact["review_status"] == "verified"
+            for fact in verified.json()["facts"]
+        )
         assert client.delete(f"/api/v2/documents/{document_id}").status_code == 409
         assert client.delete(f"/api/v2/evidence/{evidence_id}").status_code == 204
         assert client.delete(f"/api/v2/documents/{document_id}").status_code == 204

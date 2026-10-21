@@ -9,10 +9,10 @@ from app.api.routes import _document_read, _model_config_read
 from app.db import get_session
 from app.models import (
     AnalysisRun,
-    AnalysisStatus,
-    Decision,
+    Block,
     Document,
     EvidenceItem,
+    FillPlan,
     Job,
     JobStatus,
     ModelConfig,
@@ -29,6 +29,9 @@ from app.schemas import (
     SourceSpanRead,
 )
 from app.security import encrypt_secret
+from app.services.checklist import build_checklist, mark_run_complete_if_ready
+from app.services.freshness import mark_project_stale
+from app.services.jobs import enqueue
 
 router = APIRouter()
 
@@ -43,7 +46,7 @@ async def _require_idle(session: AsyncSession, project_id: str) -> None:
         )
     ).scalar_one_or_none()
     if running:
-        raise HTTPException(409, "项目有任务正在处理，请取消任务并等待结束后再删除")
+        raise HTTPException(409, "项目有任务正在处理，请等待结束或取消任务后再操作")
 
 
 @router.delete("/projects/{project_id}", status_code=204)
@@ -89,10 +92,7 @@ async def update_document(
         ).scalar_one_or_none()
         if duplicate:
             raise HTTPException(409, "同一文件已按该用途上传，请直接使用已有文件")
-        await session.execute(
-            update(AnalysisRun).where(AnalysisRun.project_id == document.project_id)
-            .values(status=AnalysisStatus.STALE)
-        )
+        await mark_project_stale(session, document.project_id)
     for key, value in data.items():
         setattr(document, key, value)
     await session.commit()
@@ -115,7 +115,15 @@ async def delete_document(document_id: str, session: AsyncSession = Depends(get_
         if reference:
             raise HTTPException(409, "该文件仍被分析记录或证据引用，请先删除相关记录再移除文件")
     await session.execute(delete(Job).where(Job.payload["document_id"].as_string() == document_id))
+    affected_runs = list((await session.execute(
+        select(FillPlan.run_id).where(FillPlan.document_id == document_id)
+    )).scalars())
+    if document.role in {"tender", "addendum", "qa"}:
+        await mark_project_stale(session, document.project_id)
     await session.execute(delete(Document).where(Document.id == document_id))
+    for run_id in affected_runs:
+        await build_checklist(session, run_id)
+        await mark_run_complete_if_ready(session, run_id)
     await session.commit()
 
 
@@ -130,7 +138,9 @@ async def list_page_spans(page_id: str, session: AsyncSession = Depends(get_sess
             select(SourceSpan).where(
                 SourceSpan.page_id == page_id,
                 SourceSpan.table_cell_id.is_(None),
-            ).order_by(SourceSpan.created_at)
+            ).join(Block, Block.id == SourceSpan.block_id)
+            .where(Block.kind != "historical_text")
+            .order_by(SourceSpan.created_at)
         )
     ).scalars().all()
     return [
@@ -157,19 +167,26 @@ async def delete_evidence(evidence_id: str, session: AsyncSession = Depends(get_
     evidence = await session.get(EvidenceItem, evidence_id)
     if evidence is None:
         raise HTTPException(404, "证据不存在")
-    await session.execute(
-        update(Decision).where(
-            Decision.run_id.in_(
-                select(AnalysisRun.id).where(AnalysisRun.project_id == evidence.project_id)
-            )
-        ).values(stale=True)
-    )
-    await session.execute(
-        update(AnalysisRun).where(AnalysisRun.project_id == evidence.project_id)
-        .values(status=AnalysisStatus.STALE)
-    )
+    await mark_project_stale(session, evidence.project_id)
     await session.execute(delete(EvidenceItem).where(EvidenceItem.id == evidence_id))
     await session.commit()
+
+
+@router.post("/documents/{document_id}/reparse", response_model=DocumentRead)
+async def reparse_document(document_id: str, session: AsyncSession = Depends(get_session)):
+    document = await session.get(Document, document_id)
+    if document is None:
+        raise HTTPException(404, "文档不存在")
+    await _require_idle(session, document.project_id)
+    document.metadata_json = {
+        **(document.metadata_json or {}), "parse_status": "queued", "parse_error": None,
+    }
+    await enqueue(session, "parse_document", {
+        "document_id": document.id, "_dedupe_key": f"parse:{document.id}",
+    })
+    await mark_project_stale(session, document.project_id)
+    await session.commit()
+    return _document_read(document)
 
 
 @router.patch("/model-configs/{config_id}", response_model=ModelConfigRead)

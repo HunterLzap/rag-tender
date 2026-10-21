@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 
 from app.domain.rules import evaluate_condition
@@ -67,3 +68,23 @@ def test_mandatory_requirement_without_evidence_needs_review():
     )
     assert status.value == "needs_review"
     assert "证据" in summary
+
+
+def test_number_rule_converts_currency_units_and_requires_known_units():
+    condition = {
+        "type": "number", "key": "contract_amount", "operator": ">=",
+        "value": "1000", "unit": "万元",
+    }
+    result = evaluate_condition(
+        condition,
+        facts=[fact("contract_amount", value_number=Decimal("5000000"), unit="元")],
+        as_of=date(2026, 1, 1),
+    )
+    assert result.status == "fail"
+    assert result.actual == "500万元"
+    missing_unit = evaluate_condition(
+        condition,
+        facts=[fact("contract_amount", value_number=Decimal("5000000"))],
+        as_of=date(2026, 1, 1),
+    )
+    assert missing_unit.status == "unknown"

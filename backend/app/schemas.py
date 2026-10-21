@@ -1,12 +1,24 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+UTCDatetime = Annotated[datetime, AfterValidator(_utc_datetime)]
 
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("*")
+    @classmethod
+    def serialize_utc_dates(cls, value):
+        return _utc_datetime(value) if isinstance(value, datetime) else value
 
 
 class ProjectCreate(BaseModel):
@@ -14,7 +26,7 @@ class ProjectCreate(BaseModel):
     bidder_name: str | None = None
     purchaser: str | None = None
     tender_no: str | None = None
-    bid_deadline: datetime | None = None
+    bid_deadline: UTCDatetime | None = None
     timezone: str = "Asia/Shanghai"
     notes: str | None = None
 
@@ -24,7 +36,7 @@ class ProjectUpdate(BaseModel):
     bidder_name: str | None = None
     purchaser: str | None = None
     tender_no: str | None = None
-    bid_deadline: datetime | None = None
+    bid_deadline: UTCDatetime | None = None
     timezone: str | None = None
     notes: str | None = None
     status: Literal["active", "archived"] | None = None
@@ -50,14 +62,14 @@ class ProjectRead(ORMModel):
 class BidCreate(BaseModel):
     bidder_name: str = Field(min_length=1, max_length=300)
     lot_code: str | None = None
-    bid_deadline: datetime | None = None
+    bid_deadline: UTCDatetime | None = None
     as_of_date: date | None = None
 
 
 class BidUpdate(BaseModel):
     bidder_name: str | None = None
     lot_code: str | None = None
-    bid_deadline: datetime | None = None
+    bid_deadline: UTCDatetime | None = None
     as_of_date: date | None = None
     status: Literal["draft", "preparing", "submitted", "closed"] | None = None
 
@@ -116,6 +128,10 @@ class PageRead(ORMModel):
     native_locator: dict[str, Any]
 
 
+class PageTextUpdate(BaseModel):
+    text: str = Field(min_length=1)
+
+
 class SourceSpanRead(ORMModel):
     id: str
     document_id: str
@@ -164,6 +180,18 @@ class RequirementUpdate(BaseModel):
     review_status: Literal["unreviewed", "confirmed", "rejected"] | None = None
 
 
+class RequirementCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    statement: str = Field(min_length=1)
+    source_span_id: str
+    category: str = "other"
+    evaluation_stage: str = "compliance"
+    evaluation_type: Literal["binary", "score", "submission", "manual"] = "manual"
+    obligation: str = "mandatory"
+    consequence: str = "rejection"
+    handling_mode: str = "manual"
+
+
 class DecisionRead(ORMModel):
     id: str
     run_id: str
@@ -186,6 +214,7 @@ class ReviewCreate(BaseModel):
     new_status: Literal["met", "not_met", "needs_review", "not_applicable"]
     reason: str = Field(min_length=1)
     reviewer: str | None = None
+    evidence_ids: list[str] | None = None
 
 
 class ReviewRecordRead(ORMModel):
@@ -258,6 +287,7 @@ class AnalysisRunCreate(BaseModel):
     model_config_id: str | None = None
     prompt_version: str = "v2.0"
     ruleset_version: str = "v2.0"
+    mode: Literal["model", "manual"] = "model"
 
 
 class AnalysisRunRead(ORMModel):
@@ -350,9 +380,14 @@ class FillTargetCreate(BaseModel):
     block_id: str | None = None
     table_cell_id: str | None = None
     kind: Literal["table_cell", "text_box", "checkbox", "signature", "date", "unknown"] = "text_box"
-    label: str
+    label: str = Field(min_length=1, max_length=300)
     bbox: list[float] = Field(min_length=4, max_length=4)
     requirement_id: str | None = None
+
+
+class FillTargetUpdate(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=300)
+    bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
 
 
 class FillSuggestionCreate(BaseModel):

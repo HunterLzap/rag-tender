@@ -137,16 +137,16 @@ export default function Shell() {
           <Typography color="text.secondary">按以下四步准备投标响应。每次返回项目，都可以从当前进度继续。</Typography>
           {[
             ['1', '准备资料', '新建项目，上传招标文件及投标模板；补充投标人、截止时间和准备填写的内容。证明材料在「证据资料」中登记。'],
-            ['2', '核对要求', '开始分析后，逐条查看要求、原文和证据。对待复核项填写复核理由，保存结论。'],
-            ['3', '确认填写', '选择模板和左侧填写位置，在右侧确认或修改内容。保存后，原页标注图会同步更新。'],
-            ['4', '检查导出', '处理交付清单中的待办，再导出检查报告。标注图用于填写参考，不会自动改写原始文件。'],
+            ['2', '核对要求', '可创建人工工作台，或在模型启用后开始分析。逐条查看原文和证据；漏提要求可手工补充，并保存复核结论。'],
+            ['3', '确认填写', '选择模板，逐项确认内容。漏识别的位置可在原页手工框选，保存后同步更新标注图。'],
+            ['4', '检查导出', '处理交付清单后下载资料包，包含检查报告、填写清单和标注图。标注图用于填写参考，原始文件不会自动改写。'],
           ].map(([number, title, text]) => <Stack key={number} direction="row" gap={1.5}><Chip label={number} color="primary" /><Box><Typography variant="subtitle2">{title}</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{text}</Typography></Box></Stack>)}
           <Divider />
           <Typography variant="subtitle2">上传时该选哪种文件？</Typography>
           <Typography variant="body2" color="text.secondary">招标文件：采购方发布的要求。投标模板：需要你填写的空表或格式文件。证明材料：用于证明资质、人员、业绩和财务情况的文件。</Typography>
           <Typography variant="subtitle2">状态怎么理解？</Typography>
           <Stack direction="row" gap={1} flexWrap="wrap"><Chip color="success" label="绿色 · 已完成 / 已确认" /><Chip color="warning" label="黄色 · 待补充 / 待复核" /><Chip color="error" label="红色 · 不符合 / 未完成" /></Stack>
-          <Typography variant="body2" color="text.secondary">离线模式可以管理资料、复核已有结果和编辑填写建议；真实模型分析和连接测试保持关闭。</Typography>
+          <Typography variant="body2" color="text.secondary">离线模式可以新建人工工作台、补充要求、校正扫描页文字、框选填写位置和导出资料；真实模型分析和连接测试保持关闭。</Typography>
           <Button variant="outlined" onClick={() => setHelpOpen(false)}>我知道了，继续操作</Button>
         </Stack>
       </Drawer>

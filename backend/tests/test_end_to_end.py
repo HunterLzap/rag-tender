@@ -45,7 +45,7 @@ def test_mock_model_pipeline_and_fill_review(monkeypatch, empty_table_pdf):
                         title="Equipment 响应",
                         statement="须填写设备名称",
                         category="submission",
-                        evaluation_stage="符合性审查",
+                        evaluation_stage="compliance",
                         handling_mode="fill",
                         block_id=block_id,
                         quote="设备名称",
@@ -234,6 +234,12 @@ def test_blocks_are_split_into_bounded_batches():
     assert len(batches) == 3
     assert all(1 < len(batch) <= 8 for batch in batches)
     assert all(sum(len(block.text) for block in batch) <= 6000 for batch in batches)
+    from types import SimpleNamespace
+
+    large = SimpleNamespace(id="original", kind="table", text="x" * 14000)
+    bounded = _block_batches([large])
+    assert all(sum(len(block.text) for block in batch) <= 6000 for batch in bounded)
+    assert all(block.id == "original" for batch in bounded for block in batch)
 
 
 def test_default_data_dir_does_not_depend_on_working_directory(monkeypatch, tmp_path):
