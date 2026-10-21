@@ -147,6 +147,14 @@ def test_mock_model_pipeline_and_fill_review(monkeypatch, empty_table_pdf):
             for target in rebuilt.json()["targets"]
             for item in target["suggestions"]
         )
+        report = client.get(f"/api/v2/analysis-runs/{run_id}/report").json()
+        assert "交付检查清单" in report["markdown"]
+        assert "智能控制柜（已复核）" in report["markdown"]
+        assert client.delete(f"/api/v2/analysis-runs/{run_id}").status_code == 204
+        assert client.get(f"/api/v2/analysis-runs/{run_id}").status_code == 404
+        deleted = client.delete(f"/api/v2/projects/{project['id']}")
+        assert deleted.status_code == 204, deleted.text
+        assert client.get(f"/api/v2/projects/{project['id']}").status_code == 404
 
 
 async def _run_worker_until(

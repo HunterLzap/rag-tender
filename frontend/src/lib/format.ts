@@ -11,3 +11,9 @@ export function formatDate(value: string | null | undefined): string {
     timeStyle: 'short',
   }).format(new Date(value));
 }
+
+export function dateTimeInput(value: string | null | undefined): string {
+  if (!value) return '';
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}

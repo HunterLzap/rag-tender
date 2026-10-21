@@ -1,6 +1,10 @@
 :root {
-  color: #24201a;
-  background: #f4f1e8;
+  --color-brand: #b7432b;
+  --color-canvas: #f6f7f9;
+  --color-border: #e4e7ec;
+  --color-ink: #202939;
+  color: var(--color-ink);
+  background: var(--color-canvas);
   font-synthesis: none;
 }
 
@@ -17,9 +21,8 @@ body,
 
 body {
   background:
-    radial-gradient(circle at 8% 0%, rgba(183, 67, 43, 0.1), transparent 28rem),
-    linear-gradient(135deg, rgba(29, 92, 86, 0.05) 0, transparent 42%),
-    #f4f1e8;
+    radial-gradient(ellipse at 100% 0, rgba(183, 67, 43, 0.035), transparent 45rem),
+    var(--color-canvas);
 }
 
 a {
@@ -27,14 +30,31 @@ a {
   text-decoration: none;
 }
 
+a:focus-visible, button:focus-visible, [role="button"]:focus-visible {
+  outline: 3px solid #285daa;
+  outline-offset: 3px;
+}
+
+.skip-link {
+  position: fixed;
+  top: -80px;
+  left: 16px;
+  z-index: 1500;
+  padding: 12px 20px;
+  background: white;
+  border: 2px solid var(--color-brand);
+}
+
+.skip-link:focus { top: 12px; }
+
 .paper-frame {
-  box-shadow: 0 18px 60px rgba(70, 53, 28, 0.12);
+  box-shadow: 0 3px 14px rgba(16, 24, 40, 0.045);
 }
 
 .page-canvas {
   position: relative;
   background: #fff;
-  border: 1px solid #d8d0bf;
+  border: 1px solid var(--color-border);
 }
 
 .page-canvas img {
@@ -45,5 +65,15 @@ a {
 
 .custom-scrollbar {
   scrollbar-width: thin;
-  scrollbar-color: #b8aa94 transparent;
+  scrollbar-color: #c4cad3 transparent;
+}
+
+.section-anchor { scroll-margin-top: 96px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .workspace-content { animation: reveal-workspace 180ms ease-out; }
+  @keyframes reveal-workspace {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 }

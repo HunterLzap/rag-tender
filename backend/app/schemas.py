@@ -91,6 +91,11 @@ class DocumentRead(ORMModel):
     created_at: datetime
 
 
+class DocumentUpdate(BaseModel):
+    filename: str | None = Field(default=None, min_length=1, max_length=500)
+    role: Literal["tender", "addendum", "qa", "template", "evidence"] | None = None
+
+
 class BBox(BaseModel):
     x0: float
     y0: float
@@ -507,6 +512,15 @@ class ModelConfigRead(ORMModel):
     config_json: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+
+class ModelConfigUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    base_url: str | None = Field(default=None, min_length=1)
+    api_key: str | None = Field(default=None, min_length=1, repr=False)
+    text_model: str | None = Field(default=None, min_length=1)
+    vision_model: str | None = None
+    is_active: bool | None = None
 
 
 class ModelTestRequest(BaseModel):

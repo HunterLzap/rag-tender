@@ -12,8 +12,11 @@ import {
   Stack,
   TextField,
   Typography,
+  LinearProgress,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
+import { EmptyState, Guidance } from '../components/Workspace';
 import {
   api,
   type AnnotationAsset,
@@ -30,9 +33,9 @@ interface Props {
 
 const statusLabel: Record<string, string> = {
   proposed: '待确认',
-  accepted: '已接受',
+  accepted: '已确认',
   edited: '已修改',
-  missing_evidence: '缺少依据',
+  missing_evidence: '待补充',
   rejected: '已拒绝',
 };
 
@@ -86,7 +89,7 @@ export default function FillPanel({ runId, projectId }: Props) {
   const selectedPlan = plan.data;
   const selectedTarget =
     selectedPlan?.targets.find((target) => target.id === selectedTargetId) ??
-    selectedPlan?.targets.find((target) => target.suggestions.length > 0) ??
+    selectedPlan?.targets.find((target) => !['accepted', 'edited', 'rejected'].includes(target.suggestions[0]?.status)) ??
     selectedPlan?.targets[0];
   const selectedSuggestion = selectedTarget?.suggestions[0];
   const selectedAsset = selectedPlan?.assets.find(
@@ -102,6 +105,7 @@ export default function FillPanel({ runId, projectId }: Props) {
   }, [selectedTarget, selectedSuggestion]);
 
   const save = useMutation({
+    onMutate: () => { setError(''); setMessage(''); },
     mutationFn: async ({
       suggestion,
       value,
@@ -119,13 +123,18 @@ export default function FillPanel({ runId, projectId }: Props) {
         })
       ).data,
     onSuccess: async () => {
-      setMessage('填写建议已保存');
+      setMessage('本项已保存，标注图已同步更新');
       await queryClient.invalidateQueries({ queryKey: ['fill-plan', runId, templateId] });
+      await queryClient.invalidateQueries({ queryKey: ['checklist', runId] });
+      await queryClient.invalidateQueries({ queryKey: ['run', runId] });
+      const next = selectedPlan?.targets.find((target) => target.id !== selectedTarget?.id && !['accepted', 'edited', 'rejected'].includes(target.suggestions[0]?.status));
+      if (next) setSelectedTargetId(next.id);
     },
     onError: (err) => setError(apiError(err, '保存填写建议失败')),
   });
 
   const rebuild = useMutation({
+    onMutate: () => { setError(''); setMessage(''); },
     mutationFn: async () =>
       (
         await api.post<FillPlan>(`/analysis-runs/${runId}/fill-plan`, {
@@ -147,12 +156,15 @@ export default function FillPanel({ runId, projectId }: Props) {
     }
     return groups;
   }, [selectedPlan?.targets]);
+  const reviewed = selectedPlan?.targets.filter((target) => ['accepted', 'edited', 'rejected'].includes(target.suggestions[0]?.status)).length ?? 0;
+  const total = selectedPlan?.targets.length ?? 0;
+  const nextPending = selectedPlan?.targets.find((target) => target.id !== selectedTarget?.id && !['accepted', 'edited', 'rejected'].includes(target.suggestions[0]?.status));
 
+  if (documents.isLoading) return <EmptyState title="正在加载投标模板" loading />;
+  if (documents.isError) return <Alert severity="error">模板文件加载失败，请刷新页面重试。</Alert>;
   if (!templates.length) {
     return (
-      <Alert severity="info">
-        请先在项目页上传一个标记为「投标模板」的 PDF、DOCX 或 XLSX 文件，再生成填写建议。
-      </Alert>
+      <Paper variant="outlined"><EmptyState title="先上传需要填写的投标模板" description="回到项目资料，将文件用途设为「投标模板」后上传。需要原页标注图时，优先上传 PDF。" action={<Button component={Link} to={`/projects/${projectId}?upload=template#files`} variant="contained">前往上传投标模板</Button>} /></Paper>
     );
   }
 
@@ -169,15 +181,18 @@ export default function FillPanel({ runId, projectId }: Props) {
 
   return (
     <Stack spacing={2}>
+      <Guidance step="第 3 步" title="逐项确认填写内容">
+        左侧选位置 → 右侧填内容 → 保存后查看标注图，并继续下一项。原文件不会被自动改写。
+      </Guidance>
       {error && <Alert severity="error">{error}</Alert>}
       {plan.error && <Alert severity="error">{apiError(plan.error, '加载填写计划失败')}</Alert>}
       {message && <Alert severity="success">{message}</Alert>}
-      <Paper variant="outlined" sx={{ p: 2, bgcolor: 'rgba(255,253,247,.86)' }}>
+      <Paper variant="outlined" sx={{ p: 2.5 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2} flexWrap="wrap">
           <Box>
-            <Typography variant="h6">原模板填写建议</Typography>
+            <Typography variant="h6">模板填写进度</Typography>
             <Typography variant="body2" color="text.secondary">
-              {selectedPlan?.targets.length ?? 0} 个填写位置，{selectedPlan?.assets.length ?? 0} 张标注图
+              已处理 {reviewed} / {total} 项 · {selectedPlan?.assets.length ?? 0} 张原页标注图
             </Typography>
           </Box>
           <TextField
@@ -196,16 +211,18 @@ export default function FillPanel({ runId, projectId }: Props) {
             ))}
           </TextField>
           <Button variant="outlined" disabled={rebuild.isPending} onClick={() => rebuild.mutate()}>
-            重新识别模板
+            {rebuild.isPending ? '正在更新…' : '更新填写建议'}
           </Button>
         </Stack>
+        <LinearProgress variant="determinate" value={total ? reviewed / total * 100 : 0} sx={{ mt: 2, height: 5, borderRadius: 1 }} />
       </Paper>
 
-      <Grid container spacing={2}>
-        <Grid item xs={12} lg={4}>
-          <Paper variant="outlined" sx={{ bgcolor: 'rgba(255,253,247,.88)', overflow: 'hidden' }}>
-            <Box sx={{ p: 2, borderBottom: '1px solid #ded5c5' }}>
-              <Typography variant="h6">填写位置</Typography>
+      <Box><Grid container spacing={2}>
+        <Grid item xs={12} md={4}>
+          <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
+            <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider' }}>
+              <Typography variant="h6">填写位置 · {Math.max(total - reviewed, 0)} 项待处理</Typography>
+              <Typography variant="caption" color="text.secondary">点击一项，查看建议与原文位置</Typography>
             </Box>
             <Box className="custom-scrollbar" sx={{ maxHeight: 620, overflow: 'auto' }}>
               {[...groupedTargets.entries()].map(([pageId, targets]) => (
@@ -218,11 +235,15 @@ export default function FillPanel({ runId, projectId }: Props) {
                     return (
                       <Box
                         key={target.id}
+                        component="button"
                         onClick={() => setSelectedTargetId(target.id)}
+                        aria-pressed={selectedTarget?.id === target.id}
                         sx={{
+                          width: '100%', display: 'block', textAlign: 'left', font: 'inherit',
+                          border: 0,
                           p: 2,
                           cursor: 'pointer',
-                          borderBottom: '1px solid #eee7db',
+                          borderBottom: '1px solid', borderColor: 'divider',
                           bgcolor:
                             selectedTarget?.id === target.id
                               ? 'rgba(183,67,43,.08)'
@@ -233,6 +254,7 @@ export default function FillPanel({ runId, projectId }: Props) {
                           <Typography fontWeight={600}>{target.label}</Typography>
                           <Chip
                             size="small"
+                            color={['accepted', 'edited'].includes(suggestion?.status) ? 'success' : suggestion?.status === 'rejected' ? 'default' : 'warning'}
                             label={statusLabel[suggestion?.status ?? ''] ?? '待填写'}
                           />
                         </Stack>
@@ -253,14 +275,36 @@ export default function FillPanel({ runId, projectId }: Props) {
           </Paper>
         </Grid>
 
-        <Grid item xs={12} lg={8}>
+        <Grid item xs={12} md={8}>
           <Stack spacing={2}>
-            <Paper variant="outlined" sx={{ p: 2, bgcolor: 'rgba(255,253,247,.88)' }}>
+            {selectedSuggestion && (
+              <Paper variant="outlined" sx={{ p: 2.5 }}>
+                <Stack spacing={2}>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}><Typography variant="h6">{selectedTarget?.label} · 填写内容</Typography><Chip label={statusLabel[selectedSuggestion.status] ?? '待补充'} size="small" /></Stack>
+                  <Typography variant="body2" color="text.secondary">{selectedSuggestion.rationale.replace(/项目响应值/g, '填写资料')}</Typography>
+                  <TextField
+                    label="准备填写的内容" multiline minRows={3}
+                    value={draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? ''}
+                    onChange={(event) => setDraftValues((current) => ({ ...current, [selectedSuggestion.id]: event.target.value }))}
+                    helperText="没有建议内容时，可直接输入已核实的真实内容。保存后会显示在下方标注图中。"
+                  />
+                  <Stack direction="row" gap={1} flexWrap="wrap">
+                    <Button variant="contained" disabled={save.isPending || !(draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? '').trim()} onClick={() => {
+                      const value = draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? '';
+                      save.mutate({ suggestion: selectedSuggestion, value, status: value === selectedSuggestion.value ? 'accepted' : 'edited' });
+                    }}>{save.isPending ? '保存中…' : nextPending ? '确认并处理下一项' : '保存并确认'}</Button>
+                    <Button color="inherit" disabled={save.isPending} onClick={() => save.mutate({ suggestion: selectedSuggestion, value: draftValues[selectedSuggestion.id] ?? '', status: 'rejected' })}>暂不采用此项</Button>
+                    {nextPending && <Button disabled={save.isPending} onClick={() => setSelectedTargetId(nextPending.id)}>下一处待处理</Button>}
+                  </Stack>
+                </Stack>
+              </Paper>
+            )}
+            <Paper variant="outlined" sx={{ p: 2 }}>
               <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5 }}>
                 <Box>
-                  <Typography variant="h6">{selectedTarget?.label || '选择一个填写位置'}</Typography>
+                  <Typography variant="h6">原页标注预览</Typography>
                   <Typography variant="body2" color="text.secondary">
-                    {selectedSuggestion?.rationale || '标注图会直接叠加在原始模板页面上。'}
+                    建议内容直接显示在原模板中，保存后同步更新。
                   </Typography>
                 </Box>
                 {selectedAsset && (
@@ -270,7 +314,7 @@ export default function FillPanel({ runId, projectId }: Props) {
                     target="_blank"
                     rel="noreferrer"
                   >
-                    查看原图
+                    放大标注图
                   </Button>
                 )}
               </Stack>
@@ -285,69 +329,9 @@ export default function FillPanel({ runId, projectId }: Props) {
               )}
             </Paper>
 
-            {selectedSuggestion && (
-              <Paper variant="outlined" sx={{ p: 2.5, bgcolor: 'rgba(255,253,247,.88)' }}>
-                <Stack spacing={1.5}>
-                  <Typography variant="subtitle1">填写内容与审阅</Typography>
-                  <TextField
-                    label="建议填写值"
-                    multiline
-                    minRows={2}
-                    value={draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? ''}
-                    onChange={(event) =>
-                      setDraftValues((current) => ({
-                        ...current,
-                        [selectedSuggestion.id]: event.target.value,
-                      }))
-                    }
-                  />
-                  <Stack direction="row" spacing={1}>
-                    <Button
-                      variant="contained"
-                      disabled={save.isPending}
-                      onClick={() =>
-                        save.mutate({
-                          suggestion: selectedSuggestion,
-                          value: draftValues[selectedSuggestion.id] ?? '',
-                          status: 'accepted',
-                        })
-                      }
-                    >
-                      接受建议
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      disabled={save.isPending}
-                      onClick={() =>
-                        save.mutate({
-                          suggestion: selectedSuggestion,
-                          value: draftValues[selectedSuggestion.id] ?? '',
-                          status: 'edited',
-                        })
-                      }
-                    >
-                      保存修改
-                    </Button>
-                    <Button
-                      color="error"
-                      disabled={save.isPending}
-                      onClick={() =>
-                        save.mutate({
-                          suggestion: selectedSuggestion,
-                          value: draftValues[selectedSuggestion.id] ?? '',
-                          status: 'rejected',
-                        })
-                      }
-                    >
-                      拒绝
-                    </Button>
-                  </Stack>
-                </Stack>
-              </Paper>
-            )}
           </Stack>
         </Grid>
-      </Grid>
+      </Grid></Box>
     </Stack>
   );
 }

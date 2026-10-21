@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -246,6 +246,15 @@ async def upload_document(
     if len(content) > get_settings().max_upload_bytes:
         raise HTTPException(413, "文件超过上传大小限制")
     stored = store_upload(file.filename or "document.bin", content)
+    duplicate = (
+        await session.execute(select(Document.id).where(
+            Document.project_id == project_id,
+            Document.sha256 == stored.sha256,
+            Document.role == role,
+        ))
+    ).scalar_one_or_none()
+    if duplicate:
+        raise HTTPException(409, "该文件已按相同用途上传，无需重复上传")
     document = Document(
         project_id=project_id,
         role=role,
@@ -538,6 +547,7 @@ async def list_evidence(project_id: str, session: AsyncSession = Depends(get_ses
         await session.execute(
             select(EvidenceItem)
             .options(selectinload(EvidenceItem.facts))
+            .options(selectinload(EvidenceItem.source_span))
             .where((EvidenceItem.project_id == project_id) | (EvidenceItem.project_id.is_(None)))
             .order_by(EvidenceItem.created_at.desc())
         )
@@ -557,6 +567,9 @@ async def create_evidence(
     span = await session.get(SourceSpan, payload.source_span_id) if payload.source_span_id else None
     if span is None:
         raise HTTPException(400, "证据必须绑定一个有效来源片段")
+    source_document = await session.get(Document, span.document_id)
+    if source_document is None or source_document.project_id != project_id:
+        raise HTTPException(400, "请选择当前项目内的证明材料来源")
     fingerprint = __import__("hashlib").sha256(
         f"{payload.kind}|{payload.title}|{payload.identifier or ''}".encode()
     ).hexdigest()
@@ -597,8 +610,23 @@ async def update_evidence(
     evidence = await session.get(EvidenceItem, evidence_id)
     if evidence is None:
         raise HTTPException(404, "证据不存在")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    for key, value in data.items():
         setattr(evidence, key, value)
+    if "payload" in data or "valid_until" in data:
+        await session.execute(delete(EvidenceFact).where(EvidenceFact.evidence_id == evidence_id))
+        await enrich_evidence_facts(session, evidence, evidence.payload)
+    await session.execute(
+        update(Decision).where(
+            Decision.run_id.in_(
+                select(AnalysisRun.id).where(AnalysisRun.project_id == evidence.project_id)
+            )
+        ).values(stale=True)
+    )
+    await session.execute(
+        update(AnalysisRun).where(AnalysisRun.project_id == evidence.project_id)
+        .values(status="stale")
+    )
     await session.commit()
     return await _load_evidence(session, evidence.id)
 
@@ -608,6 +636,7 @@ async def _load_evidence(session: AsyncSession, evidence_id: str) -> EvidenceIte
         await session.execute(
             select(EvidenceItem)
             .options(selectinload(EvidenceItem.facts))
+            .options(selectinload(EvidenceItem.source_span))
             .where(EvidenceItem.id == evidence_id)
         )
     ).scalar_one()
@@ -719,6 +748,8 @@ async def cancel_job(job_id: str, session: AsyncSession = Depends(get_session)):
 async def create_model_config(
     payload: ModelConfigCreate, session: AsyncSession = Depends(get_session)
 ):
+    if payload.is_active:
+        await session.execute(update(ModelConfig).values(is_active=False))
     config = ModelConfig(
         name=payload.name,
         provider=payload.provider,
@@ -968,20 +999,61 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
         )
     ).scalars().all()
     summary = {status.value: 0 for status in DecisionStatus}
-    lines = ["# 投标准备检查报告", "", f"分析 ID：{run.id}", ""]
+    project = await session.get(Project, run.project_id)
+    decision_labels = {
+        "met": "符合", "not_met": "不符合",
+        "needs_review": "待人工复核", "not_applicable": "不适用",
+    }
+    lines = [
+        "# 投标准备检查报告", "",
+        f"项目：{project.name if project else '未命名项目'}",
+        f"招标编号：{project.tender_no or '未填写' if project else '未填写'}",
+        f"生成时间：{datetime.now(UTC).isoformat()}",
+        "", "## 要求核对结果", "",
+    ]
     for decision in decisions:
         summary[decision.status.value] += 1
         req = decision.requirement
         lines.extend(
             [
-                f"## {req.title}",
+                f"### {req.title}",
                 "",
-                f"- 结论：{decision.status.value}",
+                f"- 结论：{decision_labels[decision.status.value]}",
                 f"- 说明：{decision.summary}",
                 f"- 原文：{req.source_span.quote if req.source_span else '缺失'}",
                 "",
             ]
         )
+    checklist = (
+        await session.execute(select(ChecklistItem).where(ChecklistItem.run_id == run_id))
+    ).scalars().all()
+    lines.extend(["## 交付检查清单", ""])
+    for item in checklist:
+        lines.append(f"- [{'x' if item.completed else ' '}] {item.title}")
+        if item.detail:
+            lines.append(f"  - {item.detail}")
+    if not checklist:
+        lines.append("暂无检查事项。")
+    fill_rows = (
+        await session.execute(
+            select(FillTarget, FillSuggestion)
+            .join(FillPlan, FillPlan.id == FillTarget.plan_id)
+            .outerjoin(FillSuggestion, FillSuggestion.target_id == FillTarget.id)
+            .where(FillPlan.run_id == run_id)
+            .order_by(FillTarget.created_at)
+        )
+    ).all()
+    lines.extend(["", "## 模板填写建议", ""])
+    suggestion_labels = {
+        "accepted": "已确认", "edited": "已修改", "proposed": "待确认",
+        "missing_evidence": "待补充", "rejected": "未采用",
+    }
+    for target, suggestion in fill_rows:
+        value = suggestion.value if suggestion and suggestion.value else "尚未填写"
+        status = suggestion_labels.get(suggestion.status, "待补充") if suggestion else "待补充"
+        lines.extend([f"### {target.label}", "", f"- 状态：{status}", f"- 内容：{value}", ""])
+    if not fill_rows:
+        lines.append("尚未生成填写建议。")
     return ReportRead(
         run_id=run.id,
         generated_at=datetime.now(UTC),

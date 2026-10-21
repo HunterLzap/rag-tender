@@ -1,9 +1,19 @@
-import axios from 'axios';
+import axios, { isAxiosError } from 'axios';
 
 export const api = axios.create({
   baseURL: '/api/v2',
   timeout: 60_000,
 });
+
+export function apiError(error: unknown, fallback = '操作失败，请重试'): string {
+  if (isAxiosError(error)) {
+    const detail = error.response?.data?.detail;
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail)) return detail.map((item) => item.msg).join('；');
+    if (!error.response) return '无法连接本地服务，请确认服务已启动';
+  }
+  return fallback;
+}
 
 export interface Project {
   id: string;
@@ -233,6 +243,7 @@ export interface AnalysisRun {
 export interface Job {
   id: string;
   kind: string;
+  payload: Record<string, unknown>;
   status: string;
   progress: number;
   stage: string;
