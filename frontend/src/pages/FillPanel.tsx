@@ -11,13 +11,16 @@ import {
   Paper,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
   LinearProgress,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { ConfirmDialog, EmptyState, Guidance } from '../components/Workspace';
+import { ConfirmDialog, EmptyState, Notice } from '../components/Workspace';
 import FillTargetEditor from '../components/FillTargetEditor';
+import PageViewer from '../components/PageViewer';
 import {
   api,
   apiError,
@@ -50,6 +53,7 @@ export default function FillPanel({ runId, projectId }: Props) {
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
   const [editingTarget, setEditingTarget] = useState<FillTarget | null | undefined>(undefined);
   const [deletingTarget, setDeletingTarget] = useState<FillTarget | null>(null);
+  const [previewMode, setPreviewMode] = useState('annotation');
 
   const documents = useQuery({
     queryKey: ['fill-documents', projectId],
@@ -96,9 +100,8 @@ export default function FillPanel({ runId, projectId }: Props) {
     selectedPlan?.targets.find((target) => !['accepted', 'edited', 'rejected'].includes(target.suggestions[0]?.status)) ??
     selectedPlan?.targets[0];
   const selectedSuggestion = selectedTarget?.suggestions[0];
-  const selectedAsset = selectedPlan?.assets.find(
-    (asset) => asset.page_id === selectedTarget?.page_id,
-  );
+  const selectedPage = templatePages.data?.find((page) => page.id === selectedTarget?.page_id) ?? templatePages.data?.[0];
+  const selectedAsset = selectedPlan?.assets.find((asset) => asset.page_id === selectedPage?.id);
 
   useEffect(() => {
     if (!selectedTarget || !selectedSuggestion) return;
@@ -179,7 +182,7 @@ export default function FillPanel({ runId, projectId }: Props) {
   if (documents.isError) return <Alert severity="error">模板文件加载失败，请刷新页面重试。</Alert>;
   if (!templates.length) {
     return (
-      <Paper variant="outlined"><EmptyState title="先上传需要填写的投标模板" description="回到项目资料，将文件用途设为「投标模板」后上传。需要原页标注图时，优先上传 PDF。" action={<Button component={Link} to={`/projects/${projectId}?upload=template#files`} variant="contained">前往上传投标模板</Button>} /></Paper>
+      <Paper variant="outlined"><EmptyState title="上传需要填写的投标模板" description="支持 PDF、Word 和 Excel。" action={<Button component={Link} to={`/projects/${projectId}?upload=template#files`} variant="contained">上传模板</Button>} /></Paper>
     );
   }
 
@@ -196,20 +199,11 @@ export default function FillPanel({ runId, projectId }: Props) {
 
   return (
     <Stack spacing={2}>
-      <Guidance step="第 3 步" title="逐项确认填写内容">
-        左侧选位置 → 右侧填内容 → 保存后查看标注图，并继续下一项。原文件不会被自动改写。
-      </Guidance>
       {error && <Alert severity="error">{error}</Alert>}
       {plan.error && <Alert severity="error">{apiError(plan.error, '加载填写计划失败')}</Alert>}
-      {message && <Alert severity="success">{message}</Alert>}
-      <Paper variant="outlined" sx={{ p: 2.5 }}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2} flexWrap="wrap">
-          <Box>
-            <Typography variant="h6">模板填写进度</Typography>
-            <Typography variant="body2" color="text.secondary">
-              已处理 {reviewed} / {total} 项 · {selectedPlan?.assets.length ?? 0} 张原页标注图
-            </Typography>
-          </Box>
+      <Notice message={message} onClose={() => setMessage('')} />
+      <Paper variant="outlined" sx={{ px: 2, pt: 1.5, pb: 1 }}>
+        <Stack direction="row" alignItems="center" gap={1.5} flexWrap="wrap">
           <TextField
             select
             size="small"
@@ -219,28 +213,25 @@ export default function FillPanel({ runId, projectId }: Props) {
               setTemplateChoiceId(event.target.value);
               setSelectedTargetId('');
             }}
-            sx={{ minWidth: 200, maxWidth: 340 }}
+            sx={{ width: { xs: '100%', sm: 240 } }}
           >
             {templates.map((document) => (
               <MenuItem key={document.id} value={document.id}>{document.filename}</MenuItem>
             ))}
           </TextField>
-          <Button variant="outlined" disabled={rebuild.isPending} onClick={() => rebuild.mutate()}>
+          <Typography variant="body2" color="text.secondary" sx={{ flex: 1, whiteSpace: 'nowrap' }}>已处理 {reviewed} / {total}</Typography>
+          <Button disabled={rebuild.isPending} onClick={() => rebuild.mutate()}>
             {rebuild.isPending ? '正在更新…' : '更新填写建议'}
           </Button>
           <Button variant="outlined" disabled={!selectedPlan || !renderedPages.length} onClick={() => setEditingTarget(null)}>添加填写位置</Button>
         </Stack>
-        <LinearProgress variant="determinate" value={total ? reviewed / total * 100 : 0} sx={{ mt: 2, height: 5, borderRadius: 1 }} />
+        <LinearProgress variant="determinate" value={total ? reviewed / total * 100 : 0} sx={{ mt: 1.5, height: 2 }} />
       </Paper>
 
       <Box><Grid container spacing={2}>
         <Grid item xs={12} md={4}>
           <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
-            <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider' }}>
-              <Typography variant="h6">填写位置 · {Math.max(total - reviewed, 0)} 项待处理</Typography>
-              <Typography variant="caption" color="text.secondary">点击一项，查看建议与原文位置</Typography>
-            </Box>
-            <Box className="custom-scrollbar" sx={{ maxHeight: 620, overflow: 'auto' }}>
+            <Box className="custom-scrollbar" sx={{ maxHeight: { xs: 240, md: 620 }, overflow: 'auto' }}>
               {[...groupedTargets.entries()].map(([pageId, targets]) => (
                 <Box key={pageId}>
                   <Typography variant="overline" sx={{ px: 2, pt: 2, display: 'block' }}>
@@ -274,7 +265,7 @@ export default function FillPanel({ runId, projectId }: Props) {
                             label={statusLabel[suggestion?.status ?? ''] ?? '待填写'}
                           />
                         </Stack>
-                        <Typography variant="body2" sx={{ mt: 1 }}>
+                        <Typography variant="body2" color="text.secondary" sx={{ mt: 1, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                           {suggestion?.value || '尚无可填写值'}
                         </Typography>
                       </Box>
@@ -283,26 +274,23 @@ export default function FillPanel({ runId, projectId }: Props) {
                 </Box>
               ))}
               {selectedPlan?.targets.length === 0 && (
-                <Typography color="text.secondary" sx={{ p: 3 }}>
-                  未识别到可填写位置。请确认模板包含可解析的表格或下划线字段。
-                </Typography>
+                <EmptyState title="暂无填写位置" action={<Button disabled={!renderedPages.length} onClick={() => setEditingTarget(null)}>手工框选位置</Button>} />
               )}
             </Box>
           </Paper>
         </Grid>
 
-        <Grid item xs={12} md={8}>
+        <Grid item xs={12} md={8} sx={{ minWidth: 0 }}>
           <Stack spacing={2}>
             {selectedSuggestion && (
-              <Paper variant="outlined" sx={{ p: 2.5 }}>
+              <Paper variant="outlined" sx={{ p: 2 }}>
                 <Stack spacing={2}>
-                  <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}><Typography variant="h6">{selectedTarget?.label} · 填写内容</Typography><Chip label={statusLabel[selectedSuggestion.status] ?? '待补充'} size="small" /></Stack>
-                  <Typography variant="body2" color="text.secondary">{selectedSuggestion.rationale.replace(/项目响应值/g, '填写资料')}</Typography>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}><Typography variant="h6">{selectedTarget?.label}</Typography><Chip label={statusLabel[selectedSuggestion.status] ?? '待补充'} size="small" /></Stack>
+                  {selectedSuggestion.rationale && <Typography variant="caption" color="text.secondary">{selectedSuggestion.rationale.replace(/项目响应值/g, '填写资料')}</Typography>}
                   <TextField
                     label="准备填写的内容" multiline minRows={3}
                     value={draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? ''}
                     onChange={(event) => setDraftValues((current) => ({ ...current, [selectedSuggestion.id]: event.target.value }))}
-                    helperText="没有建议内容时，可直接输入已核实的真实内容。保存后会显示在下方标注图中。"
                   />
                   <Stack direction="row" gap={1} flexWrap="wrap">
                     <Button variant="contained" disabled={save.isPending || !(draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? '').trim()} onClick={() => {
@@ -312,35 +300,30 @@ export default function FillPanel({ runId, projectId }: Props) {
                     <Button color="inherit" disabled={save.isPending} onClick={() => save.mutate({ suggestion: selectedSuggestion, value: draftValues[selectedSuggestion.id] ?? '', status: 'rejected' })}>暂不采用此项</Button>
                     {nextPending && <Button disabled={save.isPending} onClick={() => setSelectedTargetId(nextPending.id)}>下一处待处理</Button>}
                   </Stack>
-                  {selectedTarget && <Stack direction="row" gap={1}><Button size="small" disabled={!renderedPages.some((page) => page.id === selectedTarget.page_id)} onClick={() => setEditingTarget(selectedTarget)}>修正填写位置</Button><Button size="small" color="error" onClick={() => setDeletingTarget(selectedTarget)}>移除此位置</Button></Stack>}
+                  {selectedTarget && <Stack direction="row" gap={1}><Button size="small" disabled={!renderedPages.some((page) => page.id === selectedTarget.page_id)} onClick={() => setEditingTarget(selectedTarget)}>编辑字段与位置</Button><Button size="small" color="error" onClick={() => setDeletingTarget(selectedTarget)}>移除此位置</Button></Stack>}
                 </Stack>
               </Paper>
             )}
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5 }}>
-                <Box>
-                  <Typography variant="h6">原页标注预览</Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    建议内容直接显示在原模板中，保存后同步更新。
-                  </Typography>
-                </Box>
+                <ToggleButtonGroup exclusive size="small" value={previewMode} onChange={(_, value) => { if (value) setPreviewMode(value); }} aria-label="预览方式"><ToggleButton value="annotation">填写标注</ToggleButton><ToggleButton value="original">原页</ToggleButton></ToggleButtonGroup>
                 {selectedAsset && (
                   <Button
                     size="small"
-                    href={`/api/v2/annotation-assets/${selectedAsset.id}/image`}
+                    href={previewMode === 'original' && selectedPage ? `/api/v2/pages/${selectedPage.id}/image` : `/api/v2/annotation-assets/${selectedAsset.id}/image`}
                     target="_blank"
                     rel="noreferrer"
                   >
-                    放大标注图
+                    放大查看
                   </Button>
                 )}
               </Stack>
-              {selectedAsset ? (
+              {previewMode === 'original' && selectedPage ? <PageViewer page={selectedPage} /> : selectedAsset ? (
                 <AnnotatedImage asset={selectedAsset} />
               ) : (
                 <Box sx={{ p: 5, bgcolor: '#f0ece2', textAlign: 'center' }}>
                   <Typography color="text.secondary">
-                    该模板没有固定页面图，仍可在上方填写和复核；需要原页面标注图时请上传 PDF。
+                    暂无原页标注图，请先添加填写位置。
                   </Typography>
                 </Box>
               )}

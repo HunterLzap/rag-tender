@@ -230,7 +230,8 @@ async def edit_fill_target(
         if slot:
             slot.bbox_json = payload.bbox
             slot.locator = {
-                **slot.locator, "reference_only": False, "coordinate_quality": "manual",
+                **{key: value for key, value in slot.locator.items() if key != "polygon"},
+                "reference_only": False, "coordinate_quality": "manual",
             }
             slot.status = FillSlotStatus.VERIFIED
     target.updated_at = utcnow()

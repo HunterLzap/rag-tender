@@ -1,17 +1,14 @@
 import csv
 import io
 import re
-import shutil
-import subprocess
-import tempfile
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 
 import pdfplumber
 import pypdfium2 as pdfium
-from docx import Document as DocxDocument
 from openpyxl import load_workbook
+from pypdf import PdfReader
 
 from app.config import get_settings
 from app.domain.document_ir import (
@@ -21,6 +18,8 @@ from app.domain.document_ir import (
     ParsedDocument,
     ParsedPage,
 )
+from app.services.office_preview import render_office_pdf
+from app.services.scan_tables import detect_scanned_tables
 
 TEXT_MIN_CHARS = 20
 
@@ -80,7 +79,9 @@ def _render_pdf_page(pdf: pdfium.PdfDocument, page_index: int, output: Path) -> 
     return output
 
 
-def _parse_pdf(path: Path, render_dir: Path | None) -> ParsedDocument:
+def _parse_pdf(
+    path: Path, render_dir: Path | None, *, y_tolerance: float = 3,
+) -> ParsedDocument:
     pages: list[ParsedPage] = []
     pdfium_doc = pdfium.PdfDocument(path)
     try:
@@ -89,8 +90,8 @@ def _parse_pdf(path: Path, render_dir: Path | None) -> ParsedDocument:
             if len(pdf.pages) > max_pages:
                 raise DocumentNeedsVision(f"PDF 页数超过上限 {max_pages}")
             for index, raw_page in enumerate(pdf.pages):
-                text = _clean_text(raw_page.extract_text() or "")
-                lines = _words_to_lines(raw_page.extract_words())
+                text = _clean_text(raw_page.extract_text(y_tolerance=y_tolerance) or "")
+                lines = _words_to_lines(raw_page.extract_words(y_tolerance=y_tolerance))
                 blocks: list[ParsedBlock] = []
                 order = 0
                 for line in lines:
@@ -107,7 +108,7 @@ def _parse_pdf(path: Path, render_dir: Path | None) -> ParsedDocument:
 
                 tables = raw_page.find_tables()
                 for table_index, table in enumerate(tables):
-                    extracted = table.extract()
+                    extracted = table.extract(y_tolerance=y_tolerance)
                     if not extracted:
                         continue
                     table_rows = table.rows
@@ -185,7 +186,25 @@ def _parse_pdf(path: Path, render_dir: Path | None) -> ParsedDocument:
                     render_path = _render_pdf_page(
                         pdfium_doc, index, render_dir / f"page-{index + 1:04d}.png"
                     )
-                mode = "text" if len(text) >= TEXT_MIN_CHARS else "needs_vision"
+                flags = []
+                if render_path and raw_page.images and not any(
+                    block.kind == "table" for block in blocks
+                ):
+                    scan_tables = detect_scanned_tables(
+                        render_path, float(raw_page.width), float(raw_page.height),
+                    )
+                    for table in scan_tables:
+                        blocks.append(ParsedBlock(
+                            kind=table.kind, text=table.text, bbox=table.bbox,
+                            order=len(blocks), cells=table.cells, metadata=table.metadata,
+                        ))
+                    if scan_tables:
+                        flags.append("scan_table_geometry")
+                mode = (
+                    "needs_vision" if len(text) < TEXT_MIN_CHARS and raw_page.images else "text"
+                )
+                if mode == "needs_vision":
+                    flags.append("no_text_layer")
                 pages.append(
                     ParsedPage(
                         page_index=index,
@@ -194,7 +213,7 @@ def _parse_pdf(path: Path, render_dir: Path | None) -> ParsedDocument:
                         text=text,
                         blocks=tuple(blocks),
                         parse_mode=mode,
-                        quality_flags=() if mode == "text" else ("no_text_layer",),
+                        quality_flags=tuple(flags),
                         render_path=render_path,
                         native_locator={"kind": "pdf", "page_index": index},
                     )
@@ -204,129 +223,44 @@ def _parse_pdf(path: Path, render_dir: Path | None) -> ParsedDocument:
     return ParsedDocument(pages=tuple(pages), metadata={"page_count": len(pages)})
 
 
-def _docx_blocks(document: DocxDocument) -> list[ParsedBlock]:
-    blocks: list[ParsedBlock] = []
-    order = 0
-    for paragraph in document.paragraphs:
-        text = _clean_text(paragraph.text)
-        if not text:
-            continue
-        blocks.append(
-            ParsedBlock(
-                kind="paragraph",
-                text=text,
-                bbox=(0, 0, 595, 842),
-                order=order,
-                metadata={"style": paragraph.style.name if paragraph.style else None},
-            )
-        )
-        order += 1
-    for table_index, table in enumerate(document.tables):
-        rows = [[_clean_text(cell.text) for cell in row.cells] for row in table.rows]
-        cells = tuple(
-            ParsedCell(
-                row=row_index,
-                col=col_index,
-                row_span=1,
-                col_span=1,
-                text=value,
-                bbox=(0, 0, 595, 842),
-                native_locator={
-                    "table_index": table_index,
-                    "row": row_index,
-                    "col": col_index,
-                },
-            )
-            for row_index, row in enumerate(rows)
-            for col_index, value in enumerate(row)
-        )
-        blocks.append(
-            ParsedBlock(
-                kind="table",
-                text="\n".join(" | ".join(row) for row in rows),
-                bbox=(0, 0, 595, 842),
-                order=order,
-                cells=cells,
-                metadata={"table_index": table_index},
-            )
-        )
-        order += 1
-    return blocks
-
-
-def _parse_docx(path: Path) -> ParsedDocument:
-    _validate_zip(path)
-    document = DocxDocument(path)
-    blocks = _docx_blocks(document)
+def _parse_office(path: Path, render_dir: Path | None) -> ParsedDocument:
+    if path.suffix.lower() in {".docx", ".xlsx"}:
+        _validate_zip(path)
+    converted = render_office_pdf(path)
+    # Font substitution can shift CJK glyph baselines slightly on Office exports.
+    parsed = _parse_pdf(converted, render_dir, y_tolerance=4)
+    labels: dict[int, str] = {}
+    sheets = []
+    if path.suffix.lower() == ".xlsx":
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        sheets = [sheet.title for sheet in workbook if sheet.sheet_state == "visible"]
+        workbook.close()
+        reader = PdfReader(converted)
+        for destination in reader.outline:
+            if isinstance(destination, list):
+                continue
+            if destination.title in sheets:
+                index = reader.get_destination_page_number(destination)
+                if index is not None:
+                    labels[index] = destination.title
+    pages = []
+    label = None
+    for page in parsed.pages:
+        label = labels.get(page.page_index, label)
+        pages.append(ParsedPage(
+            page_index=page.page_index, width=page.width, height=page.height,
+            text=page.text, blocks=page.blocks, printed_label=label,
+            parse_mode=page.parse_mode, quality_flags=page.quality_flags,
+            render_path=page.render_path,
+            native_locator={
+                "kind": path.suffix[1:].lower(), "page_index": page.page_index,
+                "rendered_as": "pdf", **({"sheet": label} if label else {}),
+            },
+        ))
     return ParsedDocument(
-        pages=(
-            ParsedPage(
-                page_index=0,
-                width=595,
-                height=842,
-                text="\n\n".join(block.text for block in blocks),
-                blocks=tuple(blocks),
-                parse_mode="text",
-                quality_flags=("no_page_coordinates",),
-                native_locator={"kind": "docx"},
-            ),
-        ),
-        metadata={"page_count": 1, "coordinate_quality": "document_flow"},
+        pages=tuple(pages),
+        metadata={**parsed.metadata, "preview_engine": "libreoffice", "sheets": sheets},
     )
-
-
-def _parse_xlsx(path: Path) -> ParsedDocument:
-    _validate_zip(path)
-    workbook = load_workbook(path, data_only=True)
-    pages: list[ParsedPage] = []
-    for sheet_index, sheet in enumerate(workbook.worksheets):
-        blocks: list[ParsedBlock] = []
-        cells: list[ParsedCell] = []
-        rows_text: list[str] = []
-        for row_index, row in enumerate(sheet.iter_rows()):
-            values = [str(cell.value).strip() if cell.value is not None else "" for cell in row]
-            if any(values):
-                rows_text.append(" | ".join(values))
-            for col_index, value in enumerate(values):
-                cells.append(
-                    ParsedCell(
-                        row=row_index,
-                        col=col_index,
-                        row_span=1,
-                        col_span=1,
-                        text=value,
-                        bbox=(col_index, row_index, col_index + 1, row_index + 1),
-                        native_locator={
-                            "sheet": sheet.title,
-                            "row": row_index + 1,
-                            "col": col_index + 1,
-                        },
-                    )
-                )
-        blocks.append(
-            ParsedBlock(
-                kind="table",
-                text="\n".join(rows_text),
-                bbox=(0, 0, max(sheet.max_column, 1), max(sheet.max_row, 1)),
-                order=0,
-                cells=tuple(cells),
-                metadata={"sheet": sheet.title},
-            )
-        )
-        pages.append(
-            ParsedPage(
-                page_index=sheet_index,
-                width=max(sheet.max_column, 1),
-                height=max(sheet.max_row, 1),
-                text="\n".join(rows_text),
-                blocks=tuple(blocks),
-                printed_label=sheet.title,
-                parse_mode="text",
-                quality_flags=("spreadsheet_coordinates",),
-                native_locator={"kind": "xlsx", "sheet": sheet.title},
-            )
-        )
-    return ParsedDocument(pages=tuple(pages), metadata={"page_count": len(pages)})
 
 
 def _parse_csv(path: Path) -> ParsedDocument:
@@ -365,46 +299,13 @@ def _parse_csv(path: Path) -> ParsedDocument:
     return ParsedDocument(pages=(page,), metadata={"page_count": 1})
 
 
-def _convert_to_pdf(path: Path) -> Path:
-    soffice = get_settings().libreoffice_path or shutil.which("soffice")
-    if not soffice:
-        raise DocumentNeedsVision("未找到 LibreOffice，无法把 DOC 转换为 PDF")
-    with tempfile.TemporaryDirectory() as temp_dir:
-        result = subprocess.run(
-            [
-                soffice,
-                "--headless",
-                "--norestore",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                temp_dir,
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        converted = Path(temp_dir) / f"{path.stem}.pdf"
-        if result.returncode != 0 or not converted.exists():
-            raise DocumentNeedsVision(f"LibreOffice 转换失败: {result.stderr[-500:]}")
-        target = path.with_suffix(".converted.pdf")
-        shutil.move(converted, target)
-        return target
-
-
 def parse_document(path: Path, render_root: Path | None = None) -> ParsedDocument:
     suffix = path.suffix.lower()
     render_dir = render_root / path.stem if render_root else None
     if suffix == ".pdf":
         return _parse_pdf(path, render_dir)
-    if suffix == ".docx":
-        return _parse_docx(path)
-    if suffix == ".doc":
-        return _parse_pdf(_convert_to_pdf(path), render_dir)
-    if suffix == ".xlsx":
-        return _parse_xlsx(path)
+    if suffix in {".doc", ".docx", ".xlsx"}:
+        return _parse_office(path, render_dir)
     if suffix == ".csv":
         return _parse_csv(path)
     raise DocumentNeedsVision(f"暂不支持直接解析 {suffix or '未知格式'} 文件")

@@ -54,7 +54,10 @@ async def parse_document_job(session: AsyncSession, job: Job) -> dict[str, Any]:
         )
     ).scalars().all()
     for page_record in page_records:
-        if page_record.parse_mode != "needs_vision" or not page_record.render_path:
+        if (
+            page_record.parse_mode != "needs_vision" or not page_record.render_path
+            or not get_settings().live_model_calls
+        ):
             continue
         try:
             text = await transcribe_scanned_page(

@@ -18,7 +18,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { api, type AnalysisRun, type Project } from '../lib/api';
 
-const sidebarWidth = 224;
+const sidebarWidth = 216;
 
 export default function Shell() {
   const location = useLocation();
@@ -69,7 +69,6 @@ export default function Shell() {
         <Box><Typography fontWeight={700} sx={{ fontSize: 15 }}>投标响应工作台</Typography><Typography variant="overline" color="text.secondary" sx={{ fontSize: 9 }}>TENDER WORKSPACE</Typography></Box>
       </Box>
       <Box sx={{ px: 1.5, pt: 2, flex: 1 }}>
-        <Typography variant="overline" color="text.secondary" sx={{ px: 1.5 }}>工作空间</Typography>
         <List sx={{ pt: 1 }}>
           <ListItemButton component={Link} to="/" selected={location.pathname === '/'} onClick={() => setMobileOpen(false)} sx={navStyle}>
             <ListItemIcon sx={{ minWidth: 34, color: 'inherit' }}><DashboardOutlined fontSize="small" /></ListItemIcon><ListItemText primary="全部项目" />
@@ -92,7 +91,7 @@ export default function Shell() {
             </Collapse>
           </>}
         </List>
-        <Typography variant="overline" color="text.secondary" sx={{ px: 1.5, mt: 3, display: 'block' }}>系统管理</Typography>
+        <Divider sx={{ my: 2 }} />
         <List>
           <ListItemButton component={Link} to="/settings" selected={location.pathname === '/settings'} onClick={() => setMobileOpen(false)} sx={navStyle}>
             <ListItemIcon sx={{ minWidth: 34, color: 'inherit' }}><SettingsOutlined fontSize="small" /></ListItemIcon><ListItemText primary="模型设置" />
@@ -101,10 +100,6 @@ export default function Shell() {
             <ListItemIcon sx={{ minWidth: 34 }}><HelpOutlineRounded fontSize="small" /></ListItemIcon><ListItemText primary="操作指南" />
           </ListItemButton>
         </List>
-      </Box>
-      <Box sx={{ m: 2, p: 1.5, bgcolor: '#F8F9FB', border: '1px solid', borderColor: 'divider', borderRadius: 1.5 }}>
-        <Typography variant="caption" fontWeight={600} display="block">每一步都有据可查</Typography>
-        <Typography variant="caption" color="text.secondary">原文定位 · 人工复核 · 填写标注</Typography>
       </Box>
     </Stack>
   );
@@ -116,7 +111,7 @@ export default function Shell() {
       <Drawer open={mobileOpen} onClose={() => setMobileOpen(false)} sx={{ display: { md: 'none' } }} PaperProps={{ sx: { width: sidebarWidth } }}>{nav}</Drawer>
       <Box sx={{ ml: { md: `${sidebarWidth}px` } }}>
         <AppBar position="sticky" elevation={0} sx={{ bgcolor: 'rgba(255,255,255,.96)', color: 'text.primary', borderBottom: '1px solid', borderColor: 'divider', backdropFilter: 'blur(12px)' }}>
-          <Toolbar sx={{ minHeight: '64px !important', gap: 1, px: { xs: 2, lg: 4 } }}>
+          <Toolbar sx={{ minHeight: '52px !important', gap: 1, px: { xs: 2, lg: 3 } }}>
             <IconButton aria-label="打开导航菜单" onClick={() => setMobileOpen(true)} sx={{ display: { md: 'none' }, mr: 1 }}><MenuRounded /></IconButton>
             <Breadcrumbs aria-label="面包屑导航" separator={<NavigateNextRounded sx={{ fontSize: 15 }} />} sx={{ flex: 1, minWidth: 0, '& ol': { flexWrap: 'nowrap' } }}>
               <MuiLink component={Link} to="/" underline="hover" color="text.secondary" fontSize={13}>项目</MuiLink>
@@ -127,7 +122,7 @@ export default function Shell() {
             <IconButton aria-label="打开操作指南" onClick={() => setHelpOpen(true)}><HelpOutlineRounded fontSize="small" /></IconButton>
           </Toolbar>
         </AppBar>
-        <Box component="main" id="main-content" className="workspace-content" sx={{ maxWidth: 1600, mx: 'auto', px: { xs: 2, sm: 3, lg: 4 }, py: { xs: 2.5, sm: 3.5 } }}>
+        <Box component="main" id="main-content" className="workspace-content" sx={{ maxWidth: 1600, mx: 'auto', px: { xs: 2, sm: 3 }, py: 2.5 }}>
           <Outlet />
         </Box>
       </Box>

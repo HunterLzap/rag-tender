@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import {
-  Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent,
-  DialogContentText, DialogTitle, Paper, Stack, Typography,
+  Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent,
+  DialogContentText, DialogTitle, Paper, Snackbar, Stack, Typography,
 } from '@mui/material';
 import ArrowForwardRounded from '@mui/icons-material/ArrowForwardRounded';
 import CheckCircleOutlineRounded from '@mui/icons-material/CheckCircleOutlineRounded';
@@ -16,12 +16,16 @@ export function PageHeader({ title, description, eyebrow, actions }: {
     <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={2} alignItems={{ sm: 'center' }}>
       <Box minWidth={0}>
         {eyebrow && <Typography variant="overline" color="primary.main">{eyebrow}</Typography>}
-        <Typography component="h1" variant="h3">{title}</Typography>
+        <Typography component="h1" variant="h5" sx={{ fontSize: 20, overflowWrap: 'anywhere' }}>{title}</Typography>
         {description && <Typography color="text.secondary" sx={{ mt: 0.75, maxWidth: 760 }}>{description}</Typography>}
       </Box>
       {actions && <Stack direction="row" gap={1} flexWrap="wrap" flexShrink={0}>{actions}</Stack>}
     </Stack>
   );
+}
+
+export function Notice({ message, onClose }: { message: string; onClose: () => void }) {
+  return <Snackbar open={Boolean(message)} autoHideDuration={3500} onClose={onClose} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}><Alert severity="success" onClose={onClose} variant="filled" sx={{ boxShadow: 2 }}>{message}</Alert></Snackbar>;
 }
 
 const steps = [

@@ -15,7 +15,7 @@ export default function FillTargetEditor({ plan, pages, target, onClose, onSaved
   const page = pages.find((item) => item.id === pageId);
   const save = useMutation({
     mutationFn: async () => target
-      ? (await api.patch<FillPlan>(`/fill-targets/${target.id}`, { label: label.trim(), bbox })).data
+      ? (await api.patch<FillPlan>(`/fill-targets/${target.id}`, { label: label.trim(), ...(bbox?.some((value, index) => value !== target.bbox_json[index]) ? { bbox } : {}) })).data
       : (await api.post<FillPlan>(`/fill-plans/${plan.id}/targets`, { label: label.trim(), page_id: pageId, kind, bbox })).data,
     onSuccess: async (result) => { await onSaved(result, label.trim()); onClose(); },
   });

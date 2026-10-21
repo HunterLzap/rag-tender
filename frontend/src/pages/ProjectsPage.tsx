@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import {
-  Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, InputAdornment,
+  Alert, Button, Dialog, DialogActions, DialogContent, DialogTitle, InputAdornment,
   MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead,
   TablePagination, TableRow, TextField, Typography,
 } from '@mui/material';
@@ -11,7 +11,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, apiError, type Project } from '../lib/api';
 import { formatDate } from '../lib/format';
-import { ConfirmDialog, EmptyState, Guidance, PageHeader, StatusChip } from '../components/Workspace';
+import { ConfirmDialog, EmptyState, Notice, PageHeader, StatusChip } from '../components/Workspace';
 
 export default function ProjectsPage() {
   const queryClient = useQueryClient();
@@ -66,17 +66,14 @@ export default function ProjectsPage() {
   );
 
   return (
-    <Stack spacing={3}>
-      <PageHeader title="项目工作台" description="管理投标资料，逐步完成要求核对、模板填写和交付检查。" actions={<Button variant="contained" startIcon={<AddRounded />} onClick={() => edit(null)}>新建项目</Button>} />
-      <Guidance title="从新建项目开始，四步完成投标准备" step="操作指引">
-        准备资料 → 核对要求 → 确认填写 → 检查导出。进入任意项目后，可从顶部流程导航继续操作。
-      </Guidance>
-      {message && <Alert severity="success" onClose={() => setMessage('')}>{message}</Alert>}
+    <Stack spacing={2}>
+      <PageHeader title="项目" actions={<Button variant="contained" startIcon={<AddRounded />} onClick={() => edit(null)}>新建项目</Button>} />
+      <Notice message={message} onClose={() => setMessage('')} />
       {error && !open && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
       {projects.error && <Alert severity="error">项目加载失败，请刷新页面重试。</Alert>}
       <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={2} sx={{ p: 2.5, borderBottom: '1px solid', borderColor: 'divider' }}>
-          <Box><Typography variant="h6">项目列表</Typography><Typography variant="caption" color="text.secondary">共 {rows.length} 个项目，点击项目名称进入</Typography></Box>
+          <Typography variant="body2" color="text.secondary" sx={{ alignSelf: { sm: 'center' } }}>{rows.length} 个项目</Typography>
           <Stack direction="row" gap={1}>
             <TextField label="搜索项目" placeholder="项目名称或招标编号" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded sx={{ fontSize: 18 }} /></InputAdornment> }} sx={{ width: { xs: '100%', sm: 250 } }} />
             <TextField select label="项目状态" value={filter} onChange={(event) => { setFilter(event.target.value); setPage(0); }} sx={{ minWidth: 115, width: 125 }}><MenuItem value="active">进行中</MenuItem><MenuItem value="archived">已归档</MenuItem><MenuItem value="all">全部状态</MenuItem></TextField>

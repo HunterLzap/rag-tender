@@ -8,6 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-noto-cjk \
     libreoffice-writer \
+    libreoffice-calc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /usr/local/bin/uv

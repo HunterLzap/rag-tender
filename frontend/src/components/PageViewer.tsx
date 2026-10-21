@@ -5,9 +5,10 @@ import { api, type PageItem, type SourceSpan } from '../lib/api';
 interface Props {
   page: PageItem;
   highlight?: SourceSpan | null;
+  showLabel?: boolean;
 }
 
-export default function PageViewer({ page, highlight }: Props) {
+export default function PageViewer({ page, highlight, showLabel = true }: Props) {
   const [x0, y0, x1, y1] = highlight?.bbox_json ?? [];
   const hasBox = highlight && highlight.page_id === page.id;
   const nativeView = page.quality_flags.some(
@@ -20,13 +21,12 @@ export default function PageViewer({ page, highlight }: Props) {
   const blocks = detail.data?.blocks;
   return (
     <Stack spacing={1}>
-      <Typography variant="caption" color="text.secondary">
-        第 {page.page_index + 1} 页 · {
-          page.parse_mode === 'manual' ? '人工校正文字，定位到整页'
-            : page.parse_mode === 'text' ? '文本层'
-            : page.parse_mode === 'vision' ? '视觉转写，位置待复核' : '扫描页待人工复核'
-        }
-      </Typography>
+      {showLabel && <Typography variant="caption" color="text.secondary">
+        第 {page.page_index + 1} 页{page.printed_label ? ` · ${page.printed_label}` : ''}
+        {page.parse_mode === 'manual' ? ' · 文字已人工校正'
+          : page.parse_mode === 'vision' ? ' · 文字待复核'
+            : page.parse_mode === 'needs_vision' ? ' · 扫描页，文字待核对' : ''}
+      </Typography>}
       {nativeView ? (
         <Box className="paper-frame" sx={{ p: 3 }}>
           <Alert severity="info" sx={{ mb: 2 }}>

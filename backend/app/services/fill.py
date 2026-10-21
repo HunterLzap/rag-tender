@@ -1,3 +1,4 @@
+import math
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -76,9 +77,12 @@ async def detect_fill_slots(
                             header[col] = cell.text.strip()
             header_labels = [value for value in header if value]
             for cell in cells:
-                if not _is_placeholder(cell.text):
+                if not _is_placeholder(cell.text) or cell.native_locator.get("scan_has_content"):
                     continue
-                label = header[cell.col_index] or "待填写"
+                label = header[cell.col_index] or (
+                    f"表{(block.metadata_json or {}).get('table_index', 0) + 1}"
+                    f" · 第{cell.row_index + 1}行第{cell.col_index + 1}列"
+                )
                 left = next(
                     (
                         other for other in reversed(cells)
@@ -422,6 +426,7 @@ async def render_annotations(
                 "coordinate_quality": (
                     slot.locator.get("coordinate_quality", "native") if slot else "native"
                 ),
+                "polygon": slot.locator.get("polygon") if slot else None,
             }
             annotations.append(annotation)
         legend_cards = []
@@ -465,8 +470,14 @@ async def render_annotations(
                 value = (
                     "需人工签章" if target.kind == FillTargetKind.SIGNATURE else "待补充"
                 )
-            draw.rectangle(box, fill=(255, 246, 222), outline=color, width=2)
-            _draw_value(draw, box, value, color)
+            polygon = annotation.get("polygon")
+            if polygon:
+                points = [(point[0] * scale_x, point[1] * scale_y) for point in polygon]
+                _draw_scanned_value(image, points, value, color)
+                draw.line([*points, points[0]], fill=color, width=2)
+            else:
+                draw.rectangle(box, fill=(255, 246, 222), outline=color, width=2)
+                _draw_value(draw, box, value, color)
         legend_left = source_image.width
         draw.line((legend_left, 0, legend_left, image.height), fill=(222, 213, 197), width=2)
         draw.text(
@@ -556,6 +567,33 @@ def _draw_value(draw, box, value: str, color) -> None:
         (box[0] + padding, box[1] + padding - text_box[1]),
         text, font=font, fill=color, spacing=2,
     )
+
+
+def _draw_scanned_value(image: Image.Image, points, value: str, color) -> None:
+    origin, right, _, bottom = points
+    width = math.dist(origin, right)
+    height = math.dist(origin, bottom)
+    layer = Image.new("RGB", (math.ceil(width), math.ceil(height)), (255, 246, 222))
+    _draw_value(ImageDraw.Draw(layer), (0, 0, width, height), value, color)
+    left, top = math.floor(min(p[0] for p in points)), math.floor(min(p[1] for p in points))
+    size = (
+        math.ceil(max(p[0] for p in points)) - left,
+        math.ceil(max(p[1] for p in points)) - top,
+    )
+    ux, uy = (right[0] - origin[0]) / width, (right[1] - origin[1]) / width
+    vx, vy = (bottom[0] - origin[0]) / height, (bottom[1] - origin[1]) / height
+    # Rotate the value with the cell; paint only inside the original scan polygon.
+    transform = (
+        ux, uy, ux * (left - origin[0]) + uy * (top - origin[1]),
+        vx, vy, vx * (left - origin[0]) + vy * (top - origin[1]),
+    )
+    rotated = layer.transform(
+        size, Image.Transform.AFFINE, transform, Image.Resampling.BICUBIC,
+        fillcolor=(255, 246, 222),
+    )
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).polygon([(x - left, y - top) for x, y in points], fill=255)
+    image.paste(rotated, (left, top), mask)
 
 
 def _fit_text(text: str, font, max_width: int) -> str:
