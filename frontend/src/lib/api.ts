@@ -114,6 +114,7 @@ export interface Requirement {
   extraction_method: string;
   review_status: string;
   fingerprint: string;
+  supersedes_id: string | null;
   source_span: SourceSpan | null;
 }
 
@@ -127,7 +128,14 @@ export interface Decision {
   rule_trace: Array<Record<string, unknown>>;
   model_trace: Record<string, unknown>;
   evidence_ids: string[];
-  condition_results: Array<Record<string, unknown>>;
+  condition_results: Array<{
+    condition_id?: string;
+    label: string;
+    status: string;
+    reason: string;
+    evidence_ids: string[];
+    source_span_ids: string[];
+  }>;
   stale: boolean;
   requirement: Requirement | null;
   reviews: ReviewRecord[];
@@ -159,6 +167,7 @@ export interface FillTarget {
   table_cell_id: string | null;
   kind: string;
   label: string;
+  location_label?: string | null;
   bbox_json: number[];
   requirement_id: string | null;
   fill_slot_id: string | null;
@@ -205,6 +214,8 @@ export interface ChecklistItem {
   id: string;
   run_id: string;
   requirement_id: string | null;
+  fill_target_id: string | null;
+  template_document_id: string | null;
   title: string;
   detail: string | null;
   severity: string;

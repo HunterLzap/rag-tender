@@ -274,8 +274,19 @@ async def create_fill_plan(
         .scalars()
         .all()
     )
+    from app.services.requirement_versions import version_state
+
+    replaced, conflicts = version_state(list(requirements))
+    requirements = [item for item in requirements
+                    if item.id not in replaced and item.id not in conflicts
+                    and item.review_status != "rejected"]
     for slot in slots:
-        suggestion = _match_response_value(slot.label, response_values)
+        repeated_table_label = slot.table_cell_id and sum(
+            other.label == slot.label and other.block_id == slot.block_id for other in slots
+        ) > 1
+        suggestion = (
+            None if repeated_table_label else _match_response_value(slot.label, response_values)
+        )
         related = _match_requirement(slot.label, requirements)
         target = FillTarget(
             plan_id=plan.id,
@@ -352,8 +363,9 @@ async def rebuild_fill_plan(
         for target in targets
         if target.fill_slot_id
         and target.suggestions
-        and target.suggestions[0].status
-        in {SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED, SuggestionStatus.REJECTED}
+        and (target.suggestions[0].reviewed_at is not None
+             or target.suggestions[0].status
+             in {SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED, SuggestionStatus.REJECTED})
     }
 
     for target in targets:
@@ -402,6 +414,18 @@ async def rebuild_fill_plan(
         )
     await session.flush()
     return rebuilt
+
+
+def suggestion_display_value(target: FillTarget, suggestion: FillSuggestion | None) -> str:
+    if suggestion is None:
+        return ""
+    if suggestion.status == SuggestionStatus.REJECTED:
+        return "未采用"
+    if target.kind == FillTargetKind.SIGNATURE:
+        return "已确认线下签章" if suggestion.status in {
+            SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED,
+        } else ""
+    return suggestion.value or ""
 
 
 async def render_annotations(session: AsyncSession, plan: FillPlan) -> list[AnnotationAsset]:
@@ -459,7 +483,7 @@ async def render_annotations(session: AsyncSession, plan: FillPlan) -> list[Anno
                 "index": index,
                 "target_id": target.id,
                 "label": target.label,
-                "value": suggestion.value if suggestion else None,
+                "value": suggestion_display_value(target, suggestion),
                 "status": suggestion.status.value if suggestion else "missing_evidence",
                 "bbox": target.bbox_json,
                 "reference_only": bool(slot and slot.locator.get("reference_only")),
@@ -474,7 +498,7 @@ async def render_annotations(session: AsyncSession, plan: FillPlan) -> list[Anno
         for annotation in annotations:
             value = annotation["value"] or "待补充"
             if annotation["status"] == SuggestionStatus.REJECTED.value:
-                value = "已拒绝"
+                value = "未采用"
             note = "\n仅识别到表头，需确认实际填写行" if annotation["reference_only"] else ""
             text = f"{annotation['index']}. {annotation['label']}\n{value}{note}"
             lines = _wrap_text(text, _annotation_font(), legend_width - 48)
@@ -506,7 +530,7 @@ async def render_annotations(session: AsyncSession, plan: FillPlan) -> list[Anno
                 continue
             rejected = annotation["status"] == SuggestionStatus.REJECTED.value
             color = (120, 116, 109) if rejected else (183, 67, 43)
-            value = "已拒绝" if rejected else annotation["value"]
+            value = "未采用" if rejected else annotation["value"]
             if not value:
                 value = "需人工签章" if target.kind == FillTargetKind.SIGNATURE else "待补充"
             polygon = annotation.get("polygon")

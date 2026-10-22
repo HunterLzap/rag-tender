@@ -27,6 +27,8 @@ async def decide_run(
     job_id: str | None = None,
     config_id: str | None = None,
     use_model: bool = True,
+    requirement_ids: set[str] | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     from app.services.comparison import compare_requirement
 
@@ -67,7 +69,16 @@ async def decide_run(
         ).scalars()
     }
     counts = {status.value: 0 for status in DecisionStatus}
+    if requirement_ids is not None:
+        requirements = [item for item in requirements if item.id in requirement_ids]
+        for decision in existing.values():
+            if decision.requirement_id not in requirement_ids:
+                counts[decision.status.value] += 1
     for index, requirement in enumerate(requirements):
+        saved = existing.get(requirement.id)
+        if resume and saved is not None and not saved.stale:
+            counts[saved.status.value] += 1
+            continue
         result = await compare_requirement(
             session,
             project=project,
@@ -92,11 +103,15 @@ async def decide_run(
                 progress=70 + int((index + 1) / max(len(requirements), 1) * 18),
                 stage=f"对标要求 {index + 1}/{len(requirements)}",
             )
-    run.status = (
-        AnalysisStatus.NEEDS_REVIEW
-        if counts[DecisionStatus.NEEDS_REVIEW.value]
-        else AnalysisStatus.COMPLETED
-    )
+    # Partial clause edits cannot validate other inputs of a stale run.
+    if job_id:
+        run.status = AnalysisStatus.RUNNING
+    elif not (requirement_ids is not None and run.status == AnalysisStatus.STALE):
+        run.status = (
+            AnalysisStatus.NEEDS_REVIEW
+            if counts[DecisionStatus.NEEDS_REVIEW.value]
+            else AnalysisStatus.COMPLETED
+        )
     run.stage = "decisions_completed"
     run.progress = 88
     await session.commit()

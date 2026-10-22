@@ -8,7 +8,7 @@ import AddRounded from '@mui/icons-material/AddRounded';
 import MoreHorizRounded from '@mui/icons-material/MoreHorizRounded';
 import UploadFileOutlined from '@mui/icons-material/UploadFileOutlined';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { ConfirmDialog, EmptyState, Notice, PageHeader, StatusChip } from '../components/Workspace';
 import PageViewer from '../components/PageViewer';
 import {
@@ -106,7 +106,7 @@ export default function LibraryPage() {
   });
   const verify = useMutation({
     mutationFn: async (item: Evidence) => api.patch(`/evidence/${item.id}`, { review_status: item.review_status === 'verified' ? 'unreviewed' : 'verified' }),
-    onSuccess: async () => { setMessage('核实状态已更新，关联项目将重新对标'); await refresh(); },
+    onSuccess: async () => { setMessage('核实状态已更新，关联项目需重新核对'); await refresh(); },
     onError: (err) => setError(apiError(err)),
   });
   const saveFact = useMutation({
@@ -116,7 +116,7 @@ export default function LibraryPage() {
       value_date: editingFact!.value_date ? factValue || null : null,
       unit: factUnit.trim() || null, review_status: 'verified',
     }),
-    onSuccess: async () => { setEditingFact(null); setMessage('字段已校正，关联项目将重新对标'); await refresh(); },
+    onSuccess: async () => { setEditingFact(null); setMessage('字段已校正，关联项目需重新核对'); await refresh(); },
     onError: (err) => setError(apiError(err, '校正字段失败')),
   });
   const saveEvidence = useMutation({
@@ -137,13 +137,17 @@ export default function LibraryPage() {
     setError(''); setUploading(true);
     const targetId = organizationId;
     let count = 0;
+    const failures: string[] = [];
     try {
       for (const file of Array.from(files)) {
-        const form = new FormData(); form.append('file', file);
-        await api.post(`/organizations/${targetId}/documents`, form); count += 1;
+        try {
+          const form = new FormData(); form.append('file', file);
+          await api.post(`/organizations/${targetId}/documents`, form); count += 1;
+        } catch (err) { failures.push(`${file.name}：${apiError(err, '上传失败')}`); }
       }
-      setMessage(`${count} 份材料已上传，系统将自动处理`);
-    } catch (err) { setError(`${count ? `已上传 ${count} 份。` : ''}${apiError(err, '上传失败')}`); }
+      if (count) setMessage(`${count} 份材料已上传`);
+      if (failures.length) setError(failures.join('；'));
+    }
     finally { setUploading(false); if (fileRef.current) fileRef.current.value = ''; await refresh(); }
   }
   function view(documentId: string, title: string, span?: SourceSpan) {
@@ -169,12 +173,12 @@ export default function LibraryPage() {
             <Button color="inherit" onClick={() => editCompany(organization)}>企业信息</Button>
           </Stack>
           <Tabs value={tab} onChange={(_, value) => choose(organization.id, value)} sx={{ px: 2, borderBottom: '1px solid', borderColor: 'divider' }}><Tab value="documents" label={`材料 ${documents.data?.length ?? 0}`} /><Tab value="facts" label={`提取事实 ${evidence.data?.length ?? 0}`} /></Tabs>
-          {tab === 'documents' ? documents.isLoading ? <EmptyState loading title="正在加载材料" /> : documents.error ? <Alert severity="error" sx={{ m: 2 }}>材料加载失败。</Alert> : !docRows.length ? <EmptyState title={search ? '没有匹配的材料' : '上传企业证明材料'} description={search ? undefined : '支持资质、人员、业绩、财务和产品资料，以及证书图片。'} action={<Button variant="outlined" onClick={() => fileRef.current?.click()}>选择材料</Button>} /> : <TableContainer><Table sx={{ minWidth: 540 }} aria-label="企业材料"><TableHead><TableRow><TableCell>文件</TableCell><TableCell>处理状态</TableCell><TableCell sx={{ display: { xs: 'none', sm: 'table-cell' } }}>事实</TableCell><TableCell align="right" sx={{ width: 52 }} /></TableRow></TableHead><TableBody>{docRows.map((item) => <TableRow key={item.id} hover>
+          {tab === 'documents' ? documents.isLoading ? <EmptyState loading title="正在加载材料" /> : documents.error ? <Alert severity="error" sx={{ m: 2 }}>材料加载失败。</Alert> : !docRows.length ? <EmptyState title={search ? '没有匹配的材料' : '上传企业证明材料'} description={search ? '换个关键词或清除搜索。' : '支持资质、人员、业绩、财务和产品资料，以及证书图片。'} action={search ? <Button onClick={() => setSearch('')}>清除搜索</Button> : <Button variant="outlined" onClick={() => fileRef.current?.click()}>选择材料</Button>} /> : <TableContainer><Table sx={{ minWidth: 540 }} aria-label="企业材料"><TableHead><TableRow><TableCell>文件</TableCell><TableCell>处理状态</TableCell><TableCell sx={{ display: { xs: 'none', sm: 'table-cell' } }}>事实</TableCell><TableCell align="right" sx={{ width: 52 }} /></TableRow></TableHead><TableBody>{docRows.map((item) => <TableRow key={item.id} hover>
             <TableCell sx={{ maxWidth: 440 }}><Button color="inherit" disabled={!item.current_revision_id} sx={{ p: 0, minHeight: 0, justifyContent: 'flex-start', textAlign: 'left', fontWeight: 600, overflowWrap: 'anywhere' }} onClick={() => view(item.id, item.filename)}>{item.filename}</Button><Typography variant="caption" color="text.secondary" display="block">{item.page_count ? `${item.page_count} 页 · ` : ''}{formatBytes(item.file_size)}</Typography>{(item.parse_error || item.ai_error) && <Typography variant="caption" color="error" display="block">{item.parse_error || item.ai_error}</Typography>}</TableCell>
             <TableCell sx={{ whiteSpace: 'nowrap' }}><StatusChip status={documentStatus(item)} /><Typography variant="caption" color="text.secondary" display="block">{item.current_revision_id ? '原文已保存' : '正在解析原文'}</Typography></TableCell>
             <TableCell sx={{ display: { xs: 'none', sm: 'table-cell' } }}>{item.evidence_count}</TableCell>
             <TableCell align="right"><IconButton aria-label={`操作材料 ${item.filename}`} onClick={(e) => setDocMenu({ anchor: e.currentTarget, item })}><MoreHorizRounded /></IconButton></TableCell>
-          </TableRow>)}</TableBody></Table></TableContainer> : evidence.isLoading ? <EmptyState loading title="正在加载事实" /> : evidence.error ? <Alert severity="error" sx={{ m: 2 }}>事实加载失败。</Alert> : !factRows.length ? <EmptyState title="暂无提取事实" description={runtime.data?.live_model_calls ? '上传材料后自动提取，可在材料页查看处理进度。' : '开发阶段暂停 AI 提取；原文件与页面仍会保存，启用模型后自动入库。'} action={!runtime.data?.live_model_calls ? <Button component={Link} to="/settings">模型设置</Button> : undefined} /> : <TableContainer><Table sx={{ minWidth: 520 }} aria-label="企业事实"><TableHead><TableRow><TableCell>事实 / 主体</TableCell><TableCell>类型</TableCell><TableCell>字段</TableCell><TableCell>状态</TableCell></TableRow></TableHead><TableBody>{factRows.map((item) => <TableRow key={item.id} hover>
+          </TableRow>)}</TableBody></Table></TableContainer> : evidence.isLoading ? <EmptyState loading title="正在加载事实" /> : evidence.error ? <Alert severity="error" sx={{ m: 2 }}>事实加载失败。</Alert> : !factRows.length ? <EmptyState title={search ? '没有匹配的事实' : '暂无提取事实'} description={search ? '换个关键词或清除搜索。' : !documents.data?.length ? '先上传企业证明材料，再提取可复用事实。' : '在材料页查看处理进度；已有材料可从操作菜单重新 AI 入库。'} action={search ? <Button onClick={() => setSearch('')}>清除搜索</Button> : !documents.data?.length ? <Button variant="outlined" onClick={() => fileRef.current?.click()}>上传材料</Button> : <Button onClick={() => choose(organization.id, 'documents')}>查看材料</Button>} /> : <TableContainer><Table sx={{ minWidth: 520 }} aria-label="企业事实"><TableHead><TableRow><TableCell>事实 / 主体</TableCell><TableCell>类型</TableCell><TableCell>字段</TableCell><TableCell>状态</TableCell></TableRow></TableHead><TableBody>{factRows.map((item) => <TableRow key={item.id} hover>
             <TableCell><Button color="inherit" sx={{ p: 0, minHeight: 0, textAlign: 'left', fontWeight: 600 }} onClick={() => setDetailsId(item.id)}>{item.title}</Button><Typography variant="caption" color="text.secondary" display="block">{item.holder || '主体待核实'}{item.identifier ? ` · ${item.identifier}` : ''}</Typography></TableCell>
             <TableCell>{categoryLabels[item.kind] ?? item.kind}</TableCell><TableCell>{item.facts.length}</TableCell><TableCell><StatusChip status={item.review_status} /></TableCell>
           </TableRow>)}</TableBody></Table></TableContainer>}
@@ -186,7 +190,7 @@ export default function LibraryPage() {
         <MenuItem component="a" href={`/api/v2/documents/${docMenu?.item.id}/file`} onClick={() => setDocMenu(null)}>下载原文件</MenuItem>
         <MenuItem onClick={() => { setRenaming(docMenu!.item); setFilename(docMenu!.item.filename); setError(''); setDocMenu(null); }}>重命名</MenuItem>
         <MenuItem disabled={documentAction.isPending || ['queued', 'running'].includes(docMenu?.item.parse_status ?? '')} onClick={() => { documentAction.mutate({ item: docMenu!.item, action: 'reparse' }); setDocMenu(null); }}>重新解析</MenuItem>
-        <MenuItem disabled={!runtime.data?.live_model_calls || !docMenu?.item.current_revision_id || ['queued', 'running'].includes(docMenu?.item.ai_status ?? '') || documentAction.isPending} onClick={() => { documentAction.mutate({ item: docMenu!.item, action: 'process' }); setDocMenu(null); }}>重新 AI 入库</MenuItem>
+        <MenuItem disabled={!runtime.data?.live_model_calls || !docMenu?.item.current_revision_id || ['queued', 'running', 'failed', 'canceled'].includes(docMenu?.item.parse_status ?? '') || ['queued', 'running'].includes(docMenu?.item.ai_status ?? '') || documentAction.isPending} onClick={() => { documentAction.mutate({ item: docMenu!.item, action: 'process' }); setDocMenu(null); }}>重新 AI 入库</MenuItem>
         <Divider /><MenuItem sx={{ color: 'error.main' }} onClick={() => { const item = docMenu!.item; setDeleting({ path: `/documents/${item.id}`, title: '删除企业材料？', detail: `将删除「${item.filename}」及提取事实，所有关联项目会标记待重新对标。` }); setDocMenu(null); }}>删除材料</MenuItem>
       </Menu>
       <Dialog open={companyOpen} onClose={() => setCompanyOpen(false)} fullWidth maxWidth="sm"><DialogTitle>{editingCompany ? '企业信息' : '新增企业'}</DialogTitle><DialogContent><Stack spacing={2.5} sx={{ pt: 1 }}>{error && <Alert severity="error">{error}</Alert>}<TextField required label="企业名称" value={companyName} onChange={(e) => setCompanyName(e.target.value)} /><TextField label="统一社会信用代码（选填）" value={companyCode} onChange={(e) => setCompanyCode(e.target.value)} />{companyFields.map(([key, label]) => <TextField key={key} label={label} value={companyData[key] ?? ''} onChange={(e) => setCompanyData((current) => ({ ...current, [key]: e.target.value }))} />)}</Stack></DialogContent><DialogActions>{editingCompany && <Button color="error" onClick={() => { setCompanyOpen(false); setDeleting({ path: `/organizations/${editingCompany.id}`, title: '删除企业？', detail: '需先删除企业材料并解除项目关联，才能删除企业。' }); }}>删除企业</Button>}<Box flex={1} /><Button onClick={() => setCompanyOpen(false)}>取消</Button><Button variant="contained" disabled={!companyName.trim() || saveCompany.isPending} onClick={() => saveCompany.mutate()}>保存</Button></DialogActions></Dialog>

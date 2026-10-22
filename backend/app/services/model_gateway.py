@@ -67,7 +67,7 @@ async def complete_text(
 ) -> str:
     if not get_settings().live_model_calls:
         raise LiveModelCallsDisabled(
-            "真实模型调用已禁用；请使用模拟模型，或显式设置 TENDER_LIVE_MODEL_CALLS=true"
+            "模型服务暂不可用，请稍后重试"
         )
     await check_canceled(session, job_id)
     active = await get_active_model(session, config_id)
@@ -196,6 +196,7 @@ async def structured_text(
     instruction = (
         f"只输出合法 JSON，不要 Markdown 代码围栏或解释。必须符合以下 JSON Schema：\n{schema}"
     )
+    await check_canceled(session, job_id)
     content = await complete_text(
         session,
         system=f"{system}\n\n{instruction}",
@@ -207,6 +208,7 @@ async def structured_text(
         max_tokens=max_tokens,
         **({"image_paths": image_paths} if image_paths else {}),
     )
+    await check_canceled(session, job_id)
     try:
         return output_model.model_validate_json(_strip_fences(content))
     except (ValidationError, ValueError) as exc:
@@ -237,7 +239,7 @@ async def embed_texts(
     config_id: str | None = None,
 ) -> tuple[str, list[EmbeddingRecord]]:
     if not get_settings().live_model_calls:
-        raise LiveModelCallsDisabled("真实模型调用已禁用，Embedding 接口未执行")
+        raise LiveModelCallsDisabled("检索模型服务暂不可用，请稍后重试")
     active = await get_active_model(session, config_id)
     config = active.config
     if not config.embedding_model:
@@ -332,7 +334,7 @@ async def test_model(
     *, base_url: str, api_key: str, model: str, timeout_seconds: int = 30
 ) -> tuple[bool, int, str]:
     if not get_settings().live_model_calls:
-        return False, 0, "真实模型调用已禁用；设置 TENDER_LIVE_MODEL_CALLS=true 后才能测试连接"
+        return False, 0, "模型服务暂不可用，请稍后重试"
     started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:

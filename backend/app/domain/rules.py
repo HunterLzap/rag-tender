@@ -1,4 +1,5 @@
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -13,9 +14,10 @@ class RuleResult:
     actual: str | None
     reason: str
     critical: bool = True
+    children: tuple["RuleResult", ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "key": self.key,
             "status": self.status,
             "expected": self.expected,
@@ -23,6 +25,9 @@ class RuleResult:
             "reason": self.reason,
             "critical": self.critical,
         }
+        if self.children:
+            result["conditions"] = [item.as_dict() for item in self.children]
+        return result
 
 
 def evaluate_condition(
@@ -30,11 +35,13 @@ def evaluate_condition(
     *,
     facts: list[Any],
     as_of: date,
+    leaf_evaluator: Callable[[dict], RuleResult] | None = None,
 ) -> RuleResult:
     if condition.get("logic") in {"all", "any"}:
         children = condition.get("conditions") or []
         results = [
-            evaluate_condition(child, facts=facts, as_of=as_of) for child in children
+            evaluate_condition(child, facts=facts, as_of=as_of, leaf_evaluator=leaf_evaluator)
+            for child in children
         ]
         if not results:
             return RuleResult(
@@ -59,7 +66,10 @@ def evaluate_condition(
             condition.get("logic"),
             None,
             reason,
+            children=tuple(results),
         )
+    if leaf_evaluator:
+        return leaf_evaluator(condition)
     kind = condition.get("type")
     if kind == "certificate":
         return _certificate_rule(condition, facts, as_of)

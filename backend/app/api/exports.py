@@ -20,7 +20,9 @@ from app.models import (
     FillSuggestion,
     FillTarget,
     Page,
+    TableCell,
 )
+from app.services.fill import render_annotations, suggestion_display_value
 
 router = APIRouter()
 
@@ -37,20 +39,28 @@ async def export_bundle(run_id: str, session: AsyncSession = Depends(get_session
     if run.status in {AnalysisStatus.DRAFT, AnalysisStatus.RUNNING}:
         raise HTTPException(409, "请等待当前分析结束后再导出")
     report = await get_report(run_id, session)
+    # An interrupted draft can commit values before rendering; export their current image.
+    plans = (await session.execute(select(FillPlan).where(FillPlan.run_id == run_id))).scalars()
+    for plan in plans:
+        await render_annotations(session, plan)
+    await session.commit()
     rows = (
         await session.execute(
-            select(FillTarget, FillSuggestion, Document, Page)
+            select(FillTarget, FillSuggestion, Document, Page, TableCell)
             .join(FillPlan, FillPlan.id == FillTarget.plan_id)
             .join(Document, Document.id == FillPlan.document_id)
             .join(Page, Page.id == FillTarget.page_id)
             .outerjoin(FillSuggestion, FillSuggestion.target_id == FillTarget.id)
+            .outerjoin(TableCell, TableCell.id == FillTarget.table_cell_id)
             .where(FillPlan.run_id == run_id)
             .order_by(Document.created_at, Page.page_index, FillTarget.created_at)
         )
     ).all()
     text = io.StringIO(newline="")
     writer = csv.writer(text)
-    writer.writerow(["模板文件", "页码", "填写位置", "填写内容", "审阅状态", "说明", "填写依据"])
+    writer.writerow([
+        "模板文件", "页码", "填写位置", "行列位置", "填写内容", "审阅状态", "说明", "填写依据",
+    ])
     labels = {
         "accepted": "已确认",
         "edited": "已修改",
@@ -58,13 +68,14 @@ async def export_bundle(run_id: str, session: AsyncSession = Depends(get_session
         "rejected": "未采用",
         "missing_evidence": "待补充",
     }
-    for target, suggestion, document, page in rows:
+    for target, suggestion, document, page, cell in rows:
         writer.writerow(
             [
                 document.filename,
                 page.page_index + 1,
                 target.label,
-                suggestion.value or "" if suggestion else "",
+                f"第 {cell.row_index + 1} 行第 {cell.col_index + 1} 列" if cell else "",
+                suggestion_display_value(target, suggestion),
                 labels.get(suggestion.status, "待补充") if suggestion else "待补充",
                 suggestion.rationale if suggestion else "",
                 "；".join(

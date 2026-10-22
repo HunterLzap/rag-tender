@@ -173,10 +173,13 @@ class RequirementRead(ORMModel):
     extraction_method: str
     review_status: str
     fingerprint: str
+    supersedes_id: str | None = None
     source_span: SourceSpanRead | None = None
 
 
 class RequirementUpdate(BaseModel):
+    supersedes_ids: list[str] | None = None
+    version_confirmed: bool | None = None
     title: str | None = None
     statement: str | None = None
     category: str | None = None
@@ -338,6 +341,7 @@ class FillTargetRead(ORMModel):
     table_cell_id: str | None
     kind: str
     label: str
+    location_label: str | None = None
     bbox_json: list[float]
     requirement_id: str | None
     fill_slot_id: str | None
@@ -433,6 +437,8 @@ class ChecklistRead(ORMModel):
     id: str
     run_id: str
     requirement_id: str | None
+    fill_target_id: str | None = None
+    template_document_id: str | None = None
     title: str
     detail: str | None
     severity: str

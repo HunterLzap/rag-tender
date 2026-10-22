@@ -25,7 +25,9 @@ from app.models import (
     FillPlan,
     FillSuggestion,
     FillTarget,
+    FillTargetKind,
     Job,
+    JobStatus,
     ModelConfig,
     Organization,
     Page,
@@ -35,6 +37,7 @@ from app.models import (
     ReviewRecord,
     SourceSpan,
     SuggestionStatus,
+    TableCell,
 )
 from app.schemas import (
     AnalysisRunCreate,
@@ -85,6 +88,7 @@ from app.services.fill import (
     detect_fill_slots,
     rebuild_fill_plan,
     render_annotations,
+    suggestion_display_value,
 )
 from app.services.freshness import mark_project_stale
 from app.services.jobs import enqueue, request_cancel
@@ -93,6 +97,23 @@ from app.services.model_gateway import test_model
 from app.storage import store_upload
 
 router = APIRouter()
+
+
+async def _require_run_idle(session: AsyncSession, run_id: str) -> AnalysisRun:
+    run = await session.get(AnalysisRun, run_id)
+    if run is None:
+        raise HTTPException(404, "分析记录不存在")
+    plans = select(FillPlan.id).where(FillPlan.run_id == run_id)
+    active = (await session.execute(
+        select(Job.id).where(
+            Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+            (Job.payload["run_id"].as_string() == run_id)
+            | (Job.payload["plan_id"].as_string().in_(plans)),
+        ).limit(1)
+    )).scalar_one_or_none()
+    if active or run.status in {AnalysisStatus.DRAFT, AnalysisStatus.RUNNING}:
+        raise HTTPException(409, "分析或填写任务尚未结束，请等待结束或取消任务后再操作")
+    return run
 
 
 def _page_document_filename(span: SourceSpan, document: Document | None) -> str | None:
@@ -225,6 +246,9 @@ async def update_project(
     if any(
         key in data and data[key] != getattr(project, key)
         for key in (
+            "name",
+            "tender_no",
+            "timezone",
             "bid_deadline",
             "organization_id",
             "bidder_name",
@@ -269,6 +293,12 @@ async def create_bid(
     await session.flush()
     if bid.bid_deadline and project.bid_deadline is None:
         project.bid_deadline = bid.bid_deadline
+    await mark_project_stale(session, project_id)
+    await session.flush()
+    if project.auto_analyze and project.status == "active":
+        from app.services.pipeline import schedule_analysis
+
+        await schedule_analysis(session, project, automatic=True)
     await session.commit()
     return bid
 
@@ -285,7 +315,7 @@ async def update_bid(
     data = payload.model_dump(exclude_unset=True)
     if any(
         key in data and data[key] != getattr(bid, key)
-        for key in ("bid_deadline", "as_of_date", "bidder_name")
+        for key in ("bid_deadline", "as_of_date", "bidder_name", "lot_code", "status")
     ):
         await mark_project_stale(session, bid.project_id)
     for key, value in data.items():
@@ -293,6 +323,11 @@ async def update_bid(
     project = await session.get(Project, bid.project_id)
     if project is not None and "bid_deadline" in data:
         project.bid_deadline = data["bid_deadline"]
+    await session.flush()
+    if project and project.auto_analyze and project.status == "active":
+        from app.services.pipeline import schedule_analysis
+
+        await schedule_analysis(session, project, automatic=True)
     await session.commit()
     return bid
 
@@ -529,6 +564,20 @@ async def get_run(run_id: str, session: AsyncSession = Depends(get_session)):
     return AnalysisRunRead(**run.__dict__, requirement_count=count)
 
 
+@router.post("/analysis-runs/{run_id}/resume", response_model=JobRead, status_code=202)
+async def resume_analysis_run(run_id: str, session: AsyncSession = Depends(get_session)):
+    from app.services.model_gateway import ModelGatewayError
+    from app.services.pipeline import resume_analysis
+
+    run = await _require_run_idle(session, run_id)
+    try:
+        job = await resume_analysis(session, run)
+    except ModelGatewayError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await session.commit()
+    return job
+
+
 @router.get("/analysis-runs/{run_id}/requirements", response_model=list[RequirementRead])
 async def list_requirements(run_id: str, session: AsyncSession = Depends(get_session)):
     rows = (
@@ -568,13 +617,48 @@ async def update_requirement(
     requirement = await session.get(Requirement, requirement_id)
     if requirement is None:
         raise HTTPException(404, "要求不存在")
+    await _require_run_idle(session, requirement.run_id)
     data = payload.model_dump(exclude_unset=True)
+    supersedes_ids = data.pop("supersedes_ids", None)
+    version_confirmed = data.pop("version_confirmed", None)
+    affected_ids = {requirement.id}
+    if supersedes_ids is not None or version_confirmed:
+        from app.services.requirement_versions import replaced_ids, version_state
+
+        rows = list((await session.execute(
+            select(Requirement).where(Requirement.run_id == requirement.run_id)
+        )).scalars())
+        old_replaced, old_conflicts = version_state(rows)
+        ids = set(supersedes_ids or [])
+        if requirement.id in ids or not ids <= {item.id for item in rows}:
+            raise HTTPException(400, "只能替代同次分析中的其他条款")
+        edges = {item.id: replaced_ids(item) for item in rows}
+        edges[requirement.id] = ids
+        pending, seen = list(ids), set()
+        while pending:
+            current = pending.pop()
+            if current == requirement.id:
+                raise HTTPException(400, "条款替代关系不能形成循环")
+            if current not in seen:
+                seen.add(current)
+                pending.extend(edges.get(current, []))
+        requirement.supersedes_id = next(iter(sorted(ids)), None)
+        data["condition_json"] = {
+            **(data.get("condition_json") or requirement.condition_json or {}),
+            "_version": {"confirmed": True, "resolved": True, "supersedes_ids": sorted(ids),
+                         "relations": [], "method": "manual"},
+        }
+    statement_changed = "statement" in data and data["statement"] != requirement.statement
     for key, value in data.items():
         setattr(requirement, key, value)
-    if "statement" in data and "condition_json" not in data:
+    if statement_changed and "condition_json" not in payload.model_fields_set:
         from app.domain.rules import extract_condition
 
-        requirement.condition_json = extract_condition(requirement.statement, requirement.category)
+        requirement.condition_json = {
+            **extract_condition(requirement.statement, requirement.category),
+            **({"_version": requirement.condition_json["_version"]}
+               if "_version" in requirement.condition_json else {}),
+        }
     decision = (
         await session.execute(
             select(Decision).where(
@@ -588,9 +672,31 @@ async def update_requirement(
         decision.status = DecisionStatus.NEEDS_REVIEW
         decision.summary = "要求已人工调整，请重新核对并保存复核结论"
     run = await session.get(AnalysisRun, requirement.run_id)
+    if supersedes_ids is not None or version_confirmed:
+        from app.services.analysis import decide_run
+
+        new_replaced, new_conflicts = version_state(rows)
+        affected_ids.update(old_conflicts ^ new_conflicts)
+        affected_ids.update(
+            key for key in old_replaced.keys() | new_replaced.keys()
+            if old_replaced.get(key) != new_replaced.get(key)
+        )
+        await session.flush()
+        await decide_run(session, run, use_model=False, requirement_ids=affected_ids)
+        for target in (await session.execute(
+            select(FillTarget).join(FillPlan, FillPlan.id == FillTarget.plan_id)
+            .where(FillPlan.run_id == run.id)
+        )).scalars():
+            replacement = target.requirement_id
+            while replacement in new_replaced:
+                replacement = new_replaced[replacement]
+            target.requirement_id = None if replacement in new_conflicts else replacement
     if run and run.status == AnalysisStatus.COMPLETED:
         run.status = AnalysisStatus.NEEDS_REVIEW
-    await build_checklist(session, requirement.run_id, reset_requirement_ids={requirement.id})
+    from app.services.freshness import invalidate_fill_plans
+
+    await invalidate_fill_plans(session, [requirement.run_id])
+    await build_checklist(session, requirement.run_id, reset_requirement_ids=affected_ids)
     await session.commit()
     return (
         await session.execute(
@@ -629,6 +735,7 @@ async def create_review(
     decision = await session.get(Decision, decision_id)
     if decision is None:
         raise HTTPException(404, "判定不存在")
+    await _require_run_idle(session, decision.run_id)
     if payload.evidence_ids is not None:
         run = await session.get(AnalysisRun, decision.run_id)
         project = await session.get(Project, run.project_id)
@@ -1023,9 +1130,7 @@ async def build_fill_plan(
     payload: FillPlanRebuild | None = None,
     session: AsyncSession = Depends(get_session),
 ):
-    run = await session.get(AnalysisRun, run_id)
-    if run is None:
-        raise HTTPException(404, "分析任务不存在")
+    run = await _require_run_idle(session, run_id)
     template = await _select_template(
         session, run.project_id, payload.template_document_id if payload else None
     )
@@ -1094,6 +1199,10 @@ async def _load_fill_plan(session: AsyncSession, plan_id: str) -> FillPlanRead:
     plan = await session.get(FillPlan, plan_id)
     if plan is None:
         raise HTTPException(404, "填写计划不存在")
+    run = await session.get(AnalysisRun, plan.run_id)
+    if plan.status in {"stale", "failed", "canceled"} or run.status == AnalysisStatus.FAILED:
+        await render_annotations(session, plan)
+        await session.commit()
     targets = (
         (
             await session.execute(
@@ -1117,9 +1226,30 @@ async def _load_fill_plan(session: AsyncSession, plan_id: str) -> FillPlanRead:
         .scalars()
         .all()
     )
+    cells = list((await session.execute(
+        select(TableCell).where(TableCell.block_id.in_(
+            [target.block_id for target in targets if target.table_cell_id and target.block_id]
+        )).order_by(TableCell.row_index, TableCell.col_index)
+    )).scalars())
+    by_id = {cell.id: cell for cell in cells}
+    target_rows = []
+    for target in targets:
+        item = FillTargetRead.model_validate(target)
+        cell = by_id.get(target.table_cell_id)
+        if cell:
+            row_text = next((other.text.strip() for other in cells
+                             if other.block_id == cell.block_id
+                             and other.row_index <= cell.row_index
+                             < other.row_index + other.row_span
+                             and other.col_index < cell.col_index and other.row_index > 0
+                             and other.text.strip()), "")
+            item.location_label = f"第 {cell.row_index + 1} 行 · 第 {cell.col_index + 1} 列"
+            if row_text:
+                item.location_label += f" · {row_text}"
+        target_rows.append(item)
     return FillPlanRead(
         **plan.__dict__,
-        targets=[FillTargetRead.model_validate(target) for target in targets],
+        targets=target_rows,
         assets=[AnnotationAssetRead.model_validate(asset) for asset in assets],
     )
 
@@ -1133,23 +1263,36 @@ async def update_fill_suggestion(
     suggestion = await session.get(FillSuggestion, suggestion_id)
     if suggestion is None:
         raise HTTPException(404, "填写建议不存在")
+    target = await session.get(FillTarget, suggestion.target_id)
+    plan = await session.get(FillPlan, target.plan_id)
+    await _require_run_idle(session, plan.run_id)
     data = payload.model_dump(exclude_unset=True)
     if "value" in data and data["value"] != suggestion.value:
         data.setdefault("status", SuggestionStatus.EDITED.value)
     if data.get("status") is not None:
         data["status"] = SuggestionStatus(data["status"])
+    if data.get("status") in {SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED}:
+        if target.kind != FillTargetKind.SIGNATURE and not (
+            data.get("value", suggestion.value) or ""
+        ).strip():
+            raise HTTPException(400, "请填写内容后再确认；签字盖章请使用线下办理确认")
     for key, value in data.items():
         setattr(suggestion, key, value)
     suggestion.reviewed_at = datetime.now(UTC)
+    await session.flush()
+    await render_annotations(session, plan)
+    await build_checklist(session, plan.run_id)
+    if plan.status == "stale":
+        pending = (await session.execute(
+            select(FillSuggestion.id).join(FillTarget, FillTarget.id == FillSuggestion.target_id)
+            .where(FillTarget.plan_id == plan.id, FillSuggestion.status.in_([
+                SuggestionStatus.PROPOSED, SuggestionStatus.MISSING_EVIDENCE,
+            ])).limit(1)
+        )).scalar_one_or_none()
+        if pending is None:
+            plan.status = "reviewed"
+    await mark_run_complete_if_ready(session, plan.run_id)
     await session.commit()
-    target = await session.get(FillTarget, suggestion.target_id)
-    if target is not None and target.plan_id:
-        plan = await session.get(FillPlan, target.plan_id)
-        if plan is not None:
-            await render_annotations(session, plan)
-            await build_checklist(session, plan.run_id)
-            await mark_run_complete_if_ready(session, plan.run_id)
-            await session.commit()
     return suggestion
 
 
@@ -1163,7 +1306,7 @@ async def get_annotation_image(asset_id: str, session: AsyncSession = Depends(ge
 
 @router.get("/analysis-runs/{run_id}/checklist", response_model=list[ChecklistRead])
 async def list_checklist(run_id: str, session: AsyncSession = Depends(get_session)):
-    return (
+    items = (
         (
             await session.execute(
                 select(ChecklistItem)
@@ -1174,6 +1317,13 @@ async def list_checklist(run_id: str, session: AsyncSession = Depends(get_sessio
         .scalars()
         .all()
     )
+    targets = dict((await session.execute(
+        select(FillTarget.id, FillPlan.document_id)
+        .join(FillPlan, FillPlan.id == FillTarget.plan_id).where(FillPlan.run_id == run_id)
+    )).all())
+    return [ChecklistRead.model_validate(item).model_copy(update={
+        "template_document_id": targets.get(item.fill_target_id),
+    }) for item in items]
 
 
 @router.patch("/checklist/{item_id}", response_model=ChecklistRead)
@@ -1183,6 +1333,9 @@ async def update_checklist(
     item = await session.get(ChecklistItem, item_id)
     if item is None:
         raise HTTPException(404, "待办不存在")
+    await _require_run_idle(session, item.run_id)
+    if item.fill_target_id and payload.completed != item.completed:
+        raise HTTPException(409, "请前往对应填写位置确认或选择不采用，清单会自动同步")
     item.completed = payload.completed
     await session.commit()
     await mark_run_complete_if_ready(session, item.run_id)
@@ -1192,9 +1345,7 @@ async def update_checklist(
 
 @router.get("/analysis-runs/{run_id}/report", response_model=ReportRead)
 async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
-    run = await session.get(AnalysisRun, run_id)
-    if run is None:
-        raise HTTPException(404, "分析任务不存在")
+    run = await _require_run_idle(session, run_id)
     decisions = (
         (
             await session.execute(
@@ -1249,6 +1400,7 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
             [
                 f"### {req.title}",
                 "",
+                f"- 要求：{req.statement}",
                 f"- 结论：{decision_labels[decision.status.value]}",
                 f"- 说明：{decision.summary}",
                 f"- 来源：{source_document.filename if source_document else '缺失'}"
@@ -1298,16 +1450,28 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
         lines.append("暂无检查事项。")
     fill_rows = (
         await session.execute(
-            select(FillTarget, FillSuggestion, Document, Page)
+            select(FillTarget, FillSuggestion, Document, Page, TableCell)
             .join(FillPlan, FillPlan.id == FillTarget.plan_id)
             .join(Document, Document.id == FillPlan.document_id)
             .join(Page, Page.id == FillTarget.page_id)
             .outerjoin(FillSuggestion, FillSuggestion.target_id == FillTarget.id)
+            .outerjoin(TableCell, TableCell.id == FillTarget.table_cell_id)
             .where(FillPlan.run_id == run_id)
             .order_by(FillTarget.created_at)
         )
     ).all()
     lines.extend(["", "## 模板填写建议", ""])
+    plans = (await session.execute(
+        select(FillPlan, Document).join(Document, Document.id == FillPlan.document_id)
+        .where(FillPlan.run_id == run_id)
+    )).all()
+    for plan, document in plans:
+        if plan.status in {"failed", "canceled"}:
+            lines.append(f"- {document.filename}：填写起草未完成，保留的建议需人工核对。")
+        elif plan.status == "stale" and run.status != AnalysisStatus.STALE:
+            lines.append(f"- {document.filename}：要求已更新，填写建议及标注图需重新核对。")
+    if run.status == AnalysisStatus.STALE:
+        lines.append("- 资料已更新，以下填写建议及标注图也需重新核对。")
     suggestion_labels = {
         "accepted": "已确认",
         "edited": "已修改",
@@ -1315,14 +1479,16 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
         "missing_evidence": "待补充",
         "rejected": "未采用",
     }
-    for target, suggestion, document, page in fill_rows:
-        value = suggestion.value if suggestion and suggestion.value else "尚未填写"
+    for target, suggestion, document, page, cell in fill_rows:
+        value = suggestion_display_value(target, suggestion) or "尚未填写"
         status = suggestion_labels.get(suggestion.status, "待补充") if suggestion else "待补充"
         lines.extend(
             [
                 f"### {target.label}",
                 "",
-                f"- 位置：{document.filename} · 第 {page.page_index + 1} 页",
+                f"- 位置：{document.filename} · 第 {page.page_index + 1} 页" + (
+                    f" · 第 {cell.row_index + 1} 行第 {cell.col_index + 1} 列" if cell else ""
+                ),
                 f"- 状态：{status}",
                 f"- 内容：{value}",
                 "",
@@ -1340,6 +1506,8 @@ async def get_report(run_id: str, session: AsyncSession = Depends(get_session)):
 
 @router.get("/analysis-runs/{run_id}/checklist/auto", response_model=list[ChecklistRead])
 async def auto_checklist(run_id: str, session: AsyncSession = Depends(get_session)):
+    await _require_run_idle(session, run_id)
     items = await build_checklist(session, run_id)
+    await mark_run_complete_if_ready(session, run_id)
     await session.commit()
     return items

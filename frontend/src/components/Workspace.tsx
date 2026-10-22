@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent,
-  DialogContentText, DialogTitle, Paper, Snackbar, Stack, Typography,
+  DialogContentText, DialogTitle, Paper, Portal, Snackbar, Stack, Typography,
 } from '@mui/material';
 import ArrowForwardRounded from '@mui/icons-material/ArrowForwardRounded';
 import CheckCircleOutlineRounded from '@mui/icons-material/CheckCircleOutlineRounded';
@@ -25,7 +25,7 @@ export function PageHeader({ title, description, eyebrow, actions }: {
 }
 
 export function Notice({ message, onClose }: { message: string; onClose: () => void }) {
-  return <Snackbar open={Boolean(message)} autoHideDuration={3500} onClose={onClose} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}><Alert severity="success" onClose={onClose} variant="filled" sx={{ boxShadow: 2 }}>{message}</Alert></Snackbar>;
+  return <Portal><Snackbar open={Boolean(message)} autoHideDuration={3500} onClose={onClose} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}><Alert severity="success" onClose={onClose} variant="filled" sx={{ boxShadow: 2 }}>{message}</Alert></Snackbar></Portal>;
 }
 
 const steps = [

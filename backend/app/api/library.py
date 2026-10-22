@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.routes import _document_read, _read_documents
+from app.api.routes import _document_read, _read_documents, _require_run_idle
 from app.config import get_settings
 from app.db import get_session, utcnow
 from app.models import (
@@ -16,6 +16,7 @@ from app.models import (
     EvidenceStatus,
     FillPlan,
     Job,
+    JobStatus,
     Organization,
     Project,
     SourceSpan,
@@ -32,8 +33,10 @@ from app.schemas import (
 )
 from app.services.jobs import enqueue
 from app.services.library import mark_organization_stale
+from app.services.model_gateway import ModelGatewayError
 from app.services.pipeline import (
     pipeline_config,
+    project_inputs,
     queue_document_processing,
     schedule_analysis,
     schedule_related_projects,
@@ -363,8 +366,10 @@ async def process_document(
     if document is None:
         raise HTTPException(404, "文件不存在")
     if not get_settings().live_model_calls:
-        raise HTTPException(409, "开发阶段模型接口未启用，未执行 AI 入库")
-    if not document.current_revision_id:
+        raise HTTPException(409, "模型服务暂不可用，材料已保留")
+    if not document.current_revision_id or document.metadata_json.get("parse_status") in {
+        "queued", "running", "failed", "canceled",
+    }:
         raise HTTPException(409, "请先完成文档解析")
     await queue_document_processing(session, document)
     await session.commit()
@@ -374,16 +379,26 @@ async def process_document(
 @router.post("/fill-plans/{plan_id}/draft", response_model=JobRead, status_code=202)
 async def draft_fill_plan(plan_id: str, session: AsyncSession = Depends(get_session)):
     if not get_settings().live_model_calls:
-        raise HTTPException(409, "开发阶段模型接口未启用，未执行 AI 起草")
+        raise HTTPException(409, "模型服务暂不可用，请稍后继续起草")
     plan = await session.get(FillPlan, plan_id)
     if plan is None:
         raise HTTPException(404, "填写计划不存在")
-    from app.services.model_gateway import ModelGatewayError
+    run = await _require_run_idle(session, plan.run_id)
 
     try:
         config = await pipeline_config(session)
     except ModelGatewayError as exc:
         raise HTTPException(409, str(exc)) from exc
+    project = await session.get(Project, run.project_id)
+    _, _, signature = await project_inputs(session, project, config)
+    previous = None
+    if plan.status in {"failed", "canceled"}:
+        previous = (await session.execute(
+            select(Job).where(
+                Job.kind == "draft_fill_plan", Job.payload["plan_id"].as_string() == plan.id,
+                Job.status.in_([JobStatus.FAILED, JobStatus.CANCELED]),
+            ).order_by(Job.created_at.desc()).limit(1)
+        )).scalar_one_or_none()
     plan.status = "queued"
     job = await enqueue(
         session,
@@ -391,9 +406,12 @@ async def draft_fill_plan(plan_id: str, session: AsyncSession = Depends(get_sess
         {
             "plan_id": plan.id,
             "model_config_id": config.id,
+            "input_signature": signature,
             "_dedupe_key": f"draft:{plan.id}",
         },
     )
+    if previous and previous.payload.get("input_signature") == signature:
+        job.result = dict(previous.result or {})
     await session.commit()
     return job
 

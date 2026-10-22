@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.db import create_schema, get_engine, utcnow
 from app.models import AnalysisRun, AnalysisStatus, Document, FillPlan, Job, JobStatus
 from app.services import handlers  # noqa: F401
-from app.services.jobs import worker_loop
+from app.services.jobs import finish_canceled_job, worker_loop
 from app.services.pipeline import resume_pending_documents
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -19,8 +19,12 @@ async def fail_running_jobs(session: AsyncSession) -> None:
     jobs = (
         (await session.execute(select(Job).where(Job.status == JobStatus.RUNNING))).scalars().all()
     )
-    exhausted = [job for job in jobs if job.attempts >= job.max_attempts]
-    recoverable = [job for job in jobs if job.attempts < job.max_attempts]
+    for job in jobs:
+        if job.cancel_requested:
+            await finish_canceled_job(session, job)
+    pending = [job for job in jobs if not job.cancel_requested]
+    exhausted = [job for job in pending if job.attempts >= job.max_attempts]
+    recoverable = [job for job in pending if job.attempts < job.max_attempts]
     now = utcnow()
 
     for job in exhausted:

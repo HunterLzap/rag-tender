@@ -6,7 +6,7 @@ export const statusLabels: Record<string, string> = {
   proposed: '待确认', accepted: '已确认', edited: '已修改',
   missing_evidence: '待补充', rejected: '已拒绝',
   verified: '已核实', unreviewed: '待核实', expired: '已过期',
-  waiting_api: '待启用 AI', waiting_config: '待配置模型', ready: '已入库',
+  waiting_api: '待处理', waiting_config: '待配置模型', ready: '已入库',
   extracted: 'AI 已提取', drafting: '正在起草', drafted: '已起草',
 };
 

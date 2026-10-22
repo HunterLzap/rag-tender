@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.management import _require_document_idle, _require_idle
-from app.api.routes import _load_fill_plan
+from app.api.routes import _load_fill_plan, _require_run_idle
 from app.db import get_session, utcnow
 from app.domain.rules import extract_condition
 from app.models import (
@@ -27,6 +27,7 @@ from app.models import (
     RequirementReviewStatus,
     RequirementStatus,
     SourceSpan,
+    TableCell,
 )
 from app.schemas import (
     AnalysisRunRead,
@@ -143,6 +144,7 @@ async def add_requirement(
     run = await session.get(AnalysisRun, run_id)
     if run is None:
         raise HTTPException(404, "分析记录不存在")
+    await _require_run_idle(session, run_id)
     await _require_idle(session, run.project_id)
     span = await session.get(SourceSpan, payload.source_span_id)
     document = await session.get(Document, span.document_id) if span else None
@@ -197,6 +199,7 @@ async def recheck_rules(run_id: str, session: AsyncSession = Depends(get_session
     run = await session.get(AnalysisRun, run_id)
     if run is None:
         raise HTTPException(404, "分析记录不存在")
+    await _require_run_idle(session, run_id)
     await _require_idle(session, run.project_id)
     if run.status in {AnalysisStatus.DRAFT, AnalysisStatus.RUNNING, AnalysisStatus.FAILED}:
         raise HTTPException(409, "请先完成要求提取，或新建人工核对工作台")
@@ -255,6 +258,27 @@ async def _refresh_plan(session: AsyncSession, plan: FillPlan) -> FillPlanRead:
     return await _load_fill_plan(session, plan.id)
 
 
+async def _bind_slot_position(session: AsyncSession, slot: FillSlot, bbox: list[float]) -> None:
+    # Rebind a manually moved/created field to its actual table row, or clear the old binding.
+    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    cells = list((await session.execute(
+        select(TableCell).join(Block, Block.id == TableCell.block_id).where(
+            Block.page_id == slot.page_id, Block.kind == "table",
+            TableCell.x0 <= cx, TableCell.x1 > cx,
+            TableCell.y0 <= cy, TableCell.y1 > cy,
+        )
+    )).scalars())
+    cell = cells[0] if len(cells) == 1 else None
+    slot.table_cell_id = cell.id if cell else None
+    slot.block_id = cell.block_id if cell else None
+    slot.locator = {
+        "kind": "table_cell" if cell else "manual",
+        "coordinate_quality": "manual",
+        "reference_only": False,
+        **({"row": cell.row_index, "col": cell.col_index} if cell else {}),
+    }
+
+
 @router.post("/fill-plans/{plan_id}/targets", response_model=FillPlanRead, status_code=201)
 async def add_fill_target(
     plan_id: str,
@@ -264,6 +288,7 @@ async def add_fill_target(
     plan = await session.get(FillPlan, plan_id)
     if plan is None:
         raise HTTPException(404, "填写计划不存在")
+    await _require_run_idle(session, plan.run_id)
     page = await session.get(Page, payload.page_id)
     if page is None or page.revision_id != plan.template_revision_id:
         raise HTTPException(400, "请选择当前投标模板的页面")
@@ -279,6 +304,7 @@ async def add_fill_target(
         value_schema={"type": "string"},
     )
     session.add(slot)
+    await _bind_slot_position(session, slot, payload.bbox)
     await session.flush()
     run = await session.get(AnalysisRun, plan.run_id)
     await rebuild_fill_plan(session, plan, project_id=run.project_id)
@@ -294,6 +320,8 @@ async def edit_fill_target(
     target = await session.get(FillTarget, target_id)
     if target is None:
         raise HTTPException(404, "填写位置不存在")
+    plan = await session.get(FillPlan, target.plan_id)
+    await _require_run_idle(session, plan.run_id)
     slot = await session.get(FillSlot, target.fill_slot_id) if target.fill_slot_id else None
     if payload.label is not None:
         target.label = payload.label.strip()
@@ -305,14 +333,12 @@ async def edit_fill_target(
         target.bbox_json = payload.bbox
         if slot:
             slot.bbox_json = payload.bbox
-            slot.locator = {
-                **{key: value for key, value in slot.locator.items() if key != "polygon"},
-                "reference_only": False,
-                "coordinate_quality": "manual",
-            }
+            await _bind_slot_position(session, slot, payload.bbox)
+            target.block_id = slot.block_id
+            target.table_cell_id = slot.table_cell_id
             slot.status = FillSlotStatus.VERIFIED
     target.updated_at = utcnow()
-    return await _refresh_plan(session, await session.get(FillPlan, target.plan_id))
+    return await _refresh_plan(session, plan)
 
 
 @router.delete("/fill-targets/{target_id}", response_model=FillPlanRead)
@@ -321,6 +347,7 @@ async def remove_fill_target(target_id: str, session: AsyncSession = Depends(get
     if target is None:
         raise HTTPException(404, "填写位置不存在")
     plan = await session.get(FillPlan, target.plan_id)
+    await _require_run_idle(session, plan.run_id)
     slot = await session.get(FillSlot, target.fill_slot_id) if target.fill_slot_id else None
     if slot:
         slot.status = FillSlotStatus.IGNORED

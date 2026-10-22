@@ -11,6 +11,7 @@ import {
   Divider,
   Drawer,
   Grid,
+  IconButton,
   FormControlLabel,
   MenuItem,
   Paper,
@@ -20,6 +21,7 @@ import {
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ExpandMoreRounded from '@mui/icons-material/ExpandMoreRounded';
+import CloseRounded from '@mui/icons-material/CloseRounded';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import PageViewer from '../components/PageViewer';
 import RequirementEditor from '../components/RequirementEditor';
@@ -70,6 +72,7 @@ export default function WorkbenchPage() {
   const [reviewEvidenceIds, setReviewEvidenceIds] = useState<string[]>([]);
   const [message, setMessage] = useState('');
 
+  const runtime = useQuery({ queryKey: ['runtime'], queryFn: async () => (await api.get<{ live_model_calls: boolean }>('/health')).data });
   const run = useQuery({
     queryKey: ['run', runId],
     queryFn: async () => (await api.get<AnalysisRun>(`/analysis-runs/${runId}`)).data,
@@ -129,9 +132,14 @@ export default function WorkbenchPage() {
     await Promise.all(['decisions', 'run', 'checklist'].map((key) => queryClient.invalidateQueries({ queryKey: [key, runId] })));
     await queryClient.invalidateQueries({ queryKey: ['runs', run.data?.project_id] });
   };
+  const resume = useMutation({
+    mutationFn: async () => api.post(`/analysis-runs/${runId}/resume`),
+    onSuccess: async () => { setMessage('已继续本次分析，已保存的核验和填写结果会保留'); await refreshResults(); },
+    onError: (err) => setError(apiError(err, '继续分析失败')),
+  });
   const recheck = useMutation({
     mutationFn: async () => api.post(`/analysis-runs/${runId}/recheck`),
-    onSuccess: async () => { setMessage('已用当前资料重新执行规则核对，请继续人工复核；本次未调用模型'); await refreshResults(); },
+    onSuccess: async () => { setMessage('已按当前资料重新核对，请继续人工复核'); await refreshResults(); },
     onError: (err) => setError(apiError(err, '规则核对失败')),
   });
   const counts = useMemo(
@@ -158,8 +166,8 @@ export default function WorkbenchPage() {
       <Notice message={message} onClose={() => setMessage('')} />
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
       {['draft', 'running'].includes(run.data?.status ?? '') && <Alert severity="info">{analysisLabel[run.data?.status ?? 'draft']} · {run.data?.progress ?? 0}%</Alert>}
-      {run.data?.status === 'failed' && <Alert severity="error">{run.data.error}</Alert>}
-      {run.data?.status === 'stale' && <Alert severity="warning" action={<Button color="inherit" disabled={recheck.isPending} onClick={() => recheck.mutate()}>重新核对</Button>}>资料已更新，请重新核对；招标原文有变动时需新建工作台。</Alert>}
+      {run.data?.status === 'failed' && <Alert severity="error" action={Boolean(run.data.model_snapshot.input_signature) && <Button color="inherit" disabled={!runtime.data?.live_model_calls || resume.isPending} onClick={() => resume.mutate()}>{resume.isPending ? '提交中…' : '继续本次分析'}</Button>}>{run.data.error}</Alert>}
+      {run.data?.status === 'stale' && <Alert severity="warning" action={<Button color="inherit" disabled={recheck.isPending} onClick={() => recheck.mutate()}>重新核对</Button>}>资料已更新，原填写内容已保留，请重新核对要求与填写；招标原文有变动时需新建工作台。</Alert>}
       {tab === 0 && run.data?.coverage_notes?.length ? (
         <Accordion variant="outlined" disableGutters>
           <AccordionSummary expandIcon={<ExpandMoreRounded />}><Typography variant="body2" color="warning.main">{run.data.coverage_notes.length} 项范围待核验</Typography></AccordionSummary>
@@ -220,13 +228,13 @@ export default function WorkbenchPage() {
             {selectedPage ? (
               <Stack spacing={2}>
                 {selected && (
-                  <RequirementPanel decision={selected} sourceName={documents.data?.find((doc) => doc.id === selected.requirement?.source_span?.document_id)?.filename} pageNumber={selectedPage.page_index + 1} evidence={evidence.data?.filter((item) => selected.evidence_ids.includes(item.id)) ?? []} onEdit={() => setEditingRequirement(selected.requirement)} onReview={() => { setReviewStatus(selected.status); setReviewReason(''); setReviewEvidenceIds(selected.evidence_ids); setReviewOpen(true); }} />
+                  <RequirementPanel disabled={['draft', 'running'].includes(run.data?.status ?? '')} decision={selected} sourceName={documents.data?.find((doc) => doc.id === selected.requirement?.source_span?.document_id)?.filename} pageNumber={selectedPage.page_index + 1} evidence={evidence.data?.filter((item) => selected.evidence_ids.includes(item.id)) ?? []} onEdit={() => setEditingRequirement(selected.requirement)} onReview={() => { setReviewStatus(selected.status); setReviewReason(''); setReviewEvidenceIds(selected.evidence_ids); setReviewOpen(true); }} />
                 )}
                 <Box sx={{ maxHeight: 620, overflow: 'auto', borderRadius: 1 }}><PageViewer page={selectedPage} highlight={selected?.requirement?.source_span} /></Box>
               </Stack>
             ) : (
               <Paper variant="outlined" sx={{ p: 6, textAlign: 'center' }}>
-                <Typography color="text.secondary">暂无可显示的标书页面。</Typography>
+                {pages.isLoading || documents.isLoading ? <EmptyState loading title="正在加载原文" /> : pages.isError ? <Alert severity="error">原文加载失败，请刷新重试。</Alert> : <Typography color="text.secondary">暂无可显示的标书页面。</Typography>}
               </Paper>
             )}
           </Grid>
@@ -234,13 +242,14 @@ export default function WorkbenchPage() {
         </Stack>
       )}
 
-      {tab === 1 && run.data && <FillPanel runId={runId} projectId={run.data.project_id} />}
+      {tab === 1 && run.data && (['draft', 'running'].includes(run.data.status) ? <EmptyState loading title="正在分析并准备填写建议" /> : <FillPanel runId={runId} projectId={run.data.project_id} inputStale={run.data.status === 'stale'} />)}
       {tab === 2 && <ChecklistPanel runId={runId} />}
       <Drawer anchor="right" open={reviewOpen} onClose={() => setReviewOpen(false)}>
         <Box sx={{ width: { xs: '100vw', sm: 420 }, p: 3 }}>
-          <Typography variant="h5" sx={{ mb: 2 }}>
-            人工复核
-          </Typography>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 2 }}>
+            <Typography variant="h5">人工复核</Typography>
+            <IconButton aria-label="关闭人工复核" onClick={() => setReviewOpen(false)}><CloseRounded /></IconButton>
+          </Stack>
           <Stack spacing={2}>
             {error && <Alert severity="error">{error}</Alert>}
             <Typography color="text.secondary">{selected?.requirement?.title}。请根据原文和证据选择结论，并填写复核理由。</Typography>
@@ -266,13 +275,16 @@ export default function WorkbenchPage() {
             <Box sx={{ maxHeight: 190, overflow: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 }}>
               {evidence.data?.length ? evidence.data.map((item) => <FormControlLabel key={item.id} sx={{ display: 'flex', m: 0 }} label={`${item.title}${item.review_status === 'verified' ? ' · 已核实' : ' · 待核实'}`} control={<Checkbox checked={reviewEvidenceIds.includes(item.id)} onChange={(_, checked) => setReviewEvidenceIds((current) => checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />} />) : <Typography variant="body2" color="text.secondary">暂无已登记证据，可先到证据资料页补充。</Typography>}
             </Box>
-            <Button
+            <Stack direction="row" gap={1}>
+            <Button color="inherit" onClick={() => setReviewOpen(false)}>取消</Button>
+            <Button sx={{ flex: 1 }}
               variant="contained"
               disabled={!reviewReason.trim() || review.isPending}
               onClick={() => review.mutate()}
             >
               保存复核记录
             </Button>
+            </Stack>
           </Stack>
         </Box>
       </Drawer>
@@ -288,7 +300,9 @@ function RequirementPanel({
   sourceName,
   pageNumber,
   evidence,
+  disabled,
 }: {
+  disabled: boolean;
   decision: Decision;
   onReview: () => void;
   onEdit: () => void;
@@ -303,7 +317,7 @@ function RequirementPanel({
       <Stack spacing={2}>
         <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={2} alignItems={{ xs: 'flex-start', sm: 'center' }}>
           <Typography variant="h6">{requirement.title}</Typography>
-          <Stack direction="row" gap={1} flexShrink={0}><Button variant="outlined" onClick={onEdit}>修改要求</Button><Button variant="contained" onClick={onReview}>
+          <Stack direction="row" gap={1} flexShrink={0}><Button variant="outlined" disabled={disabled} onClick={onEdit}>修改要求</Button><Button variant="contained" disabled={disabled} onClick={onReview}>
             {decision.reviews.length ? '修改复核结论' : '人工复核'}
           </Button></Stack>
         </Stack>
@@ -315,15 +329,32 @@ function RequirementPanel({
         <Typography variant="body2" color="text.secondary">{decision.summary}</Typography>
         {decision.stale && <Alert severity="warning">该结论需按最新资料重新核对。</Alert>}
         <Typography variant="caption" color="text.secondary">证据：{evidence.length ? evidence.map((item) => `${item.title}${item.holder ? `（${item.holder}）` : ''}`).join('；') : '待补充'}</Typography>
-        {(decision.rule_trace.length > 0 || decision.reviews.length > 0) && <Accordion disableGutters elevation={0} sx={{ '&:before': { display: 'none' } }}>
+        {(decision.rule_trace.length > 0 || decision.condition_results.length > 0 || decision.reviews.length > 0) && <Accordion disableGutters elevation={0} sx={{ '&:before': { display: 'none' } }}>
           <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={{ px: 0, minHeight: 36 }}><Typography variant="body2" color="text.secondary">核对依据与复核记录</Typography></AccordionSummary>
           <AccordionDetails sx={{ px: 0, pb: 0 }}><Stack spacing={1.5}>
-            {decision.rule_trace.map((trace, index) => <Box key={index}><Typography variant="body2">{String(trace.reason ?? '')}</Typography>{trace.expected != null && <Typography variant="caption" color="text.secondary">要求：{String(trace.expected)}；实际：{trace.actual == null ? '缺少可比较字段' : String(trace.actual)}</Typography>}</Box>)}
-            {decision.rule_trace.length > 0 && decision.reviews.length > 0 && <Divider />}
+            {decision.rule_trace.map((trace, index) => <RuleTrace key={index} trace={trace} />)}
+            {decision.condition_results.length > 0 && <>
+              <Typography variant="subtitle2">逐项语义核验</Typography>
+              {decision.condition_results.map((check, index) => <Box key={`${check.condition_id ?? ''}-${index}`}>
+                <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap"><Typography variant="body2" fontWeight={600}>{check.label || `条件 ${index + 1}`}</Typography><Chip size="small" color={check.status === 'supports' ? 'success' : check.status === 'contradicts' ? 'error' : 'warning'} label={check.status === 'supports' ? '有证据支持' : check.status === 'contradicts' ? '存在矛盾' : '证据不足'} /></Stack>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{check.reason}</Typography>
+                {check.evidence_ids.length > 0 && <Typography variant="caption" color="text.secondary">依据：{evidence.filter((item) => check.evidence_ids.includes(item.id)).map((item) => item.title).join('；') || '待核实证据来源'}</Typography>}
+              </Box>)}
+            </>}
+            {(decision.rule_trace.length > 0 || decision.condition_results.length > 0) && decision.reviews.length > 0 && <Divider />}
             {[...decision.reviews].sort((a, b) => b.created_at.localeCompare(a.created_at)).map((record) => <Box key={record.id}><Typography variant="caption" color="text.secondary">{formatDate(record.created_at)} · {decisionLabel[record.new_status as keyof typeof decisionLabel]}{record.reviewer ? ` · ${record.reviewer}` : ''}</Typography><Typography variant="body2">{record.reason}</Typography></Box>)}
           </Stack></AccordionDetails>
         </Accordion>}
       </Stack>
     </Paper>
   );
+}
+
+function RuleTrace({ trace }: { trace: Record<string, unknown> }) {
+  const children = Array.isArray(trace.conditions) ? trace.conditions as Array<Record<string, unknown>> : [];
+  return <Box>
+    <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap"><Typography variant="body2">{String(trace.reason ?? '')}</Typography>{['pass', 'fail', 'unknown'].includes(String(trace.status)) && <Chip size="small" color={trace.status === 'pass' ? 'success' : trace.status === 'fail' ? 'error' : 'warning'} label={trace.status === 'pass' ? '规则通过' : trace.status === 'fail' ? '规则不满足' : '待核验'} />}</Stack>
+    {trace.expected != null && <Typography variant="caption" color="text.secondary">要求：{String(trace.expected)}；实际：{trace.actual == null ? '缺少可比较字段' : String(trace.actual)}</Typography>}
+    {children.length > 0 && <Stack spacing={1} sx={{ mt: 1, pl: 1.5, borderLeft: '1px solid', borderColor: 'divider' }}>{children.map((child, index) => <RuleTrace key={index} trace={child} />)}</Stack>}
+  </Box>;
 }

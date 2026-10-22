@@ -30,7 +30,7 @@ from app.services.fill import (
     render_annotations,
 )
 from app.services.ir_persistence import persist_parsed_document, rebuild_section_tree
-from app.services.jobs import mark_progress, register_handler
+from app.services.jobs import check_canceled, mark_progress, register_handler
 from app.services.library import index_document, mark_document_stale
 from app.services.material_extraction import extract_materials
 from app.services.parser import parse_document
@@ -57,6 +57,7 @@ async def parse_document_job(session: AsyncSession, job: Job) -> dict[str, Any]:
         __import__("pathlib").Path(document.storage_path),
         get_settings().rendered_dir,
     )
+    await check_canceled(session, job.id)
     await mark_progress(session, job.id, progress=65, stage="正在保存文档结构")
     revision = await persist_parsed_document(session, document, parsed)
     page_records = (
@@ -82,6 +83,7 @@ async def parse_document_job(session: AsyncSession, job: Job) -> dict[str, Any]:
         "parse_status": "needs_review" if review_pages else "completed",
         "parse_error": None,
     }
+    await check_canceled(session, job.id)
     await queue_document_processing(session, document)
     await session.commit()
     await mark_progress(session, job.id, progress=95, stage="文档解析完成")
@@ -159,6 +161,7 @@ async def process_document_job(session: AsyncSession, job: Job) -> dict[str, Any
     elif document.role == "template":
         await detect_fill_slots(session, document)
         await _label_scanned_slots(session, document, job)
+    await check_canceled(session, job.id)
     document.metadata_json = {
         **document.metadata_json,
         "ai_status": "needs_review" if notes else "ready",
@@ -244,12 +247,17 @@ async def _label_scanned_slots(session: AsyncSession, document: Document, job: J
     pages = {
         slot.page_id for slot in slots if slot.locator.get("coordinate_quality") == "scan_lines"
     }
-    for page_id in pages:
-        page = await session.get(Page, page_id)
+    pages = (await session.execute(
+        select(Page).where(Page.id.in_(pages)).order_by(Page.page_index)
+    )).scalars().all()
+    text_version = document.metadata_json.get("text_version", 0)
+    for page in pages:
+        page_id = page.id
         selected = [
             slot
             for slot in slots
             if slot.page_id == page_id and slot.locator.get("coordinate_quality") == "scan_lines"
+            and slot.locator.get("label_text_version") != text_version
         ]
         if not selected or not page.render_path:
             continue
@@ -277,6 +285,8 @@ async def _label_scanned_slots(session: AsyncSession, document: Document, job: J
         for item in result.labels:
             if item.slot_id in by_id and item.label.strip():
                 by_id[item.slot_id].label = item.label.strip()[:300]
+        for slot in selected:
+            slot.locator = {**slot.locator, "label_text_version": text_version}
         await session.commit()
 
 
@@ -305,12 +315,18 @@ async def analyze_project_job(session: AsyncSession, job: Job) -> dict[str, Any]
         progress_cb=update_progress,
         config_id=job.payload.get("model_config_id"),
     )
+    from app.services.requirement_versions import resolve_requirement_versions
+
+    await resolve_requirement_versions(
+        session, run.id, job_id=job.id, config_id=job.payload.get("model_config_id"),
+    )
     await mark_progress(session, job.id, progress=70, stage="执行判定")
     counts = await decide_run(
         session,
         run,
         job_id=job.id,
         config_id=job.payload.get("model_config_id"),
+        resume=bool(job.payload.get("resume")),
     )
     from app.services.suggestions import draft_fill_suggestions
 
@@ -337,9 +353,9 @@ async def analyze_project_job(session: AsyncSession, job: Job) -> dict[str, Any]
                 )
             )
         ).scalar_one_or_none()
-        if plan:
+        if plan and not job.payload.get("resume"):
             await rebuild_fill_plan(session, plan, project_id=run.project_id)
-        else:
+        elif plan is None:
             await detect_fill_slots(session, template)
             plan = await create_fill_plan(
                 session,
@@ -347,11 +363,10 @@ async def analyze_project_job(session: AsyncSession, job: Job) -> dict[str, Any]
                 project_id=run.project_id,
                 template_document=template,
             )
+        # Save located fields before an external request can fail or be canceled.
+        await session.commit()
         await draft_fill_suggestions(
-            session,
-            plan,
-            job_id=job.id,
-            config_id=job.payload.get("model_config_id"),
+            session, plan, job_id=job.id, config_id=job.payload.get("model_config_id"),
         )
         await render_annotations(session, plan)
     run.progress = 90
@@ -373,6 +388,17 @@ async def analyze_project_job(session: AsyncSession, job: Job) -> dict[str, Any]
     run.status = AnalysisStatus.NEEDS_REVIEW if notes or open_items else AnalysisStatus.COMPLETED
     run.progress = 100
     run.finished_at = utcnow()
+    if run.model_snapshot.get("input_signature"):
+        from app.models import ModelConfig, Project
+        from app.services.freshness import mark_project_stale
+        from app.services.pipeline import project_inputs
+
+        config = await session.get(ModelConfig, run.model_snapshot.get("model_config_id"))
+        project = await session.get(Project, run.project_id)
+        if config and project:
+            _, _, signature = await project_inputs(session, project, config)
+            if signature != run.model_snapshot["input_signature"]:
+                await mark_project_stale(session, project.id)
     await session.commit()
     return {
         "run_id": run.id,
@@ -400,6 +426,17 @@ async def draft_fill_plan_job(session: AsyncSession, job: Job) -> dict[str, Any]
         config_id=job.payload["model_config_id"],
     )
     await render_annotations(session, plan)
+    if job.payload.get("input_signature"):
+        from app.models import ModelConfig, Project
+        from app.services.freshness import mark_project_stale
+        from app.services.pipeline import project_inputs
+
+        run = await session.get(AnalysisRun, plan.run_id, populate_existing=True)
+        config = await session.get(ModelConfig, job.payload["model_config_id"])
+        project = await session.get(Project, run.project_id)
+        _, _, signature = await project_inputs(session, project, config)
+        if signature != job.payload["input_signature"]:
+            await mark_project_stale(session, project.id)
     await build_checklist(session, plan.run_id)
     await mark_run_complete_if_ready(session, plan.run_id)
     await session.commit()

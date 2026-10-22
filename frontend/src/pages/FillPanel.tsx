@@ -25,7 +25,7 @@ import {
 } from '@mui/material';
 import ExpandMoreRounded from '@mui/icons-material/ExpandMoreRounded';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { ConfirmDialog, EmptyState, Notice } from '../components/Workspace';
 import FillTargetEditor from '../components/FillTargetEditor';
 import PageViewer from '../components/PageViewer';
@@ -42,6 +42,7 @@ import {
 interface Props {
   runId: string;
   projectId: string;
+  inputStale: boolean;
 }
 
 const statusLabel: Record<string, string> = {
@@ -52,10 +53,11 @@ const statusLabel: Record<string, string> = {
   rejected: '已拒绝',
 };
 
-export default function FillPanel({ runId, projectId }: Props) {
+export default function FillPanel({ runId, projectId, inputStale }: Props) {
   const queryClient = useQueryClient();
-  const [selectedTargetId, setSelectedTargetId] = useState('');
-  const [templateChoiceId, setTemplateChoiceId] = useState('');
+  const [searchParams] = useSearchParams();
+  const [selectedTargetId, setSelectedTargetId] = useState(searchParams.get('target') ?? '');
+  const [templateChoiceId, setTemplateChoiceId] = useState(searchParams.get('template') ?? '');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
@@ -110,6 +112,11 @@ export default function FillPanel({ runId, projectId }: Props) {
   });
 
   const selectedPlan = plan.data;
+  const drafting = ['queued', 'drafting'].includes(selectedPlan?.status ?? '');
+  useEffect(() => {
+    setSelectedTargetId(searchParams.get('target') ?? '');
+    setTemplateChoiceId(searchParams.get('template') ?? '');
+  }, [searchParams]);
   const selectedTarget =
     selectedPlan?.targets.find((target) => target.id === selectedTargetId) ??
     selectedPlan?.targets.find((target) => !['accepted', 'edited', 'rejected'].includes(target.suggestions[0]?.status)) ??
@@ -163,17 +170,19 @@ export default function FillPanel({ runId, projectId }: Props) {
           template_document_id: templateId,
         })
       ).data,
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
       setMessage('填写计划已重建，已审阅的内容会保留');
       queryClient.setQueryData(['fill-plan', runId, templateId], result);
       setSelectedTargetId('');
+      await queryClient.invalidateQueries({ queryKey: ['checklist', runId] });
+      await queryClient.invalidateQueries({ queryKey: ['run', runId] });
     },
     onError: (err) => setError(apiError(err, '重建填写计划失败')),
   });
   const draft = useMutation({
     mutationFn: async () => api.post(`/fill-plans/${selectedPlan!.id}/draft`),
     onSuccess: async () => {
-      setMessage('正在自动起草，已确认的内容会保留');
+      setMessage(['failed', 'canceled'].includes(selectedPlan?.status ?? '') ? '正在继续起草，已完成页面和已确认内容会保留' : '正在自动起草，已确认的内容会保留');
       await queryClient.invalidateQueries({ queryKey: ['fill-plan', runId, templateId] });
     },
     onError: (err) => setError(apiError(err, '提交起草任务失败')),
@@ -224,7 +233,9 @@ export default function FillPanel({ runId, projectId }: Props) {
     <Stack spacing={2}>
       {error && <Alert severity="error">{error}</Alert>}
       {plan.error && <Alert severity="error">{apiError(plan.error, '加载填写计划失败')}</Alert>}
-      {selectedPlan?.status === 'failed' && <Alert severity="error">AI 起草未完成，已保存的内容仍可查看。请检查模型设置后重新生成。</Alert>}
+      {selectedPlan?.status === 'stale' && !inputStale && <Alert severity="warning">资料已更新，原填写内容已保留，请逐项重新确认或重新生成建议。</Alert>}
+      {selectedPlan?.status === 'failed' && <Alert severity="error">AI 起草未完成，已保存的内容仍可查看。检查模型设置后可继续起草。</Alert>}
+      {selectedPlan?.status === 'canceled' && <Alert severity="warning">AI 起草已取消，已保存的内容仍可查看。可继续人工填写或继续起草。</Alert>}
       <Notice message={message} onClose={() => setMessage('')} />
       <Paper variant="outlined" sx={{ px: 2, pt: 1.5, pb: 1 }}>
         <Stack direction="row" alignItems="center" gap={1.5} flexWrap="wrap">
@@ -247,8 +258,8 @@ export default function FillPanel({ runId, projectId }: Props) {
           <Button disabled={rebuild.isPending || ['queued', 'drafting'].includes(selectedPlan?.status ?? '')} onClick={() => rebuild.mutate()}>
             {rebuild.isPending ? '正在更新…' : '重新定位'}
           </Button>
-          <Button disabled={!runtime.data?.live_model_calls || !selectedPlan || draft.isPending || ['queued', 'drafting'].includes(selectedPlan.status)} onClick={() => draft.mutate()}>{['queued', 'drafting'].includes(selectedPlan?.status ?? '') ? '正在起草…' : 'AI 生成建议'}</Button>
-          <Button variant="outlined" disabled={!selectedPlan || !renderedPages.length} onClick={() => setEditingTarget(null)}>添加填写位置</Button>
+          <Button disabled={!runtime.data?.live_model_calls || !selectedPlan || draft.isPending || ['queued', 'drafting'].includes(selectedPlan.status)} onClick={() => draft.mutate()}>{['queued', 'drafting'].includes(selectedPlan?.status ?? '') ? '正在起草…' : ['failed', 'canceled'].includes(selectedPlan?.status ?? '') ? '继续起草' : 'AI 生成建议'}</Button>
+          <Button variant="outlined" disabled={drafting || !selectedPlan || !renderedPages.length} onClick={() => setEditingTarget(null)}>添加填写位置</Button>
         </Stack>
         <LinearProgress variant="determinate" value={total ? reviewed / total * 100 : 0} sx={{ mt: 1.5, height: 2 }} />
       </Paper>
@@ -290,8 +301,9 @@ export default function FillPanel({ runId, projectId }: Props) {
                             label={statusLabel[suggestion?.status ?? ''] ?? '待填写'}
                           />
                         </Stack>
+                        {target.location_label && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>{target.location_label}</Typography>}
                         <Typography variant="body2" color="text.secondary" sx={{ mt: 1, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                          {suggestion?.value || '尚无可填写值'}
+                          {target.kind === 'signature' ? (['accepted', 'edited'].includes(suggestion?.status) ? '已确认线下签章' : '需线下办理签章') : suggestion?.value || '尚无可填写值'}
                         </Typography>
                       </Box>
                     );
@@ -299,7 +311,7 @@ export default function FillPanel({ runId, projectId }: Props) {
                 </Box>
               ))}
               {selectedPlan?.targets.length === 0 && (
-                <EmptyState title="暂无填写位置" action={<Button disabled={!renderedPages.length} onClick={() => setEditingTarget(null)}>手工框选位置</Button>} />
+                <EmptyState title="暂无填写位置" action={<Button disabled={drafting || !renderedPages.length} onClick={() => setEditingTarget(null)}>手工框选位置</Button>} />
               )}
             </Box>
           </Paper>
@@ -311,23 +323,25 @@ export default function FillPanel({ runId, projectId }: Props) {
               <Paper variant="outlined" sx={{ p: 2 }}>
                 <Stack spacing={2}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}><Typography variant="h6">{selectedTarget?.label}</Typography><Chip label={statusLabel[selectedSuggestion.status] ?? '待补充'} size="small" /></Stack>
+                  {selectedTarget?.location_label && <Typography variant="body2" color="text.secondary">{selectedTarget.location_label}</Typography>}
                   {selectedSuggestion.rationale && <Typography variant="caption" color="text.secondary">{selectedSuggestion.rationale.replace(/项目响应值/g, '填写资料')}</Typography>}
                   {Boolean(selectedSuggestion.source_refs?.length) && <Accordion disableGutters elevation={0} sx={{ border: '1px solid', borderColor: 'divider' }}><AccordionSummary expandIcon={<ExpandMoreRounded />}><Typography variant="body2">填写依据 · {selectedSuggestion.source_refs.length} 处来源</Typography></AccordionSummary><AccordionDetails><Stack spacing={1.5}>{selectedSuggestion.source_refs.map((source, index) => <Box key={source.source_span_id ?? source.response_value_id ?? index}>{source.page_id ? <Button size="small" sx={{ p: 0 }} onClick={() => setViewingSource(source)}>{source.filename ?? '查看原文'}{source.page_index !== undefined ? ` · 第 ${source.page_index + 1} 页` : ''}</Button> : <Typography variant="caption" fontWeight={600}>{source.label ?? '项目填写资料'}</Typography>}<Typography variant="caption" color="text.secondary" display="block" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{source.quote ?? source.value}</Typography></Box>)}</Stack></AccordionDetails></Accordion>}
-                  <TextField
+                  {selectedTarget?.kind === 'signature' ? <Typography variant="body2" color="text.secondary">在原文件完成签字或盖章后确认，本系统仅记录办理状态。</Typography> : <TextField
                     label="准备填写的内容" multiline minRows={3}
                     disabled={['queued', 'drafting'].includes(selectedPlan?.status ?? '')}
                     value={draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? ''}
                     onChange={(event) => setDraftValues((current) => ({ ...current, [selectedSuggestion.id]: event.target.value }))}
-                  />
+                  />}
                   <Stack direction="row" gap={1} flexWrap="wrap">
-                    <Button variant="contained" disabled={save.isPending || !(draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? '').trim()} onClick={() => {
+                    <Button variant="contained" disabled={drafting || save.isPending || (selectedTarget?.kind !== 'signature' && !(draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? '').trim())} onClick={() => {
+                      if (selectedTarget?.kind === 'signature') { save.mutate({ suggestion: selectedSuggestion, value: '', status: 'accepted' }); return; }
                       const value = draftValues[selectedSuggestion.id] ?? selectedSuggestion.value ?? '';
                       save.mutate({ suggestion: selectedSuggestion, value, status: value === selectedSuggestion.value ? 'accepted' : 'edited' });
-                    }}>{save.isPending ? '保存中…' : nextPending ? '确认并处理下一项' : '保存并确认'}</Button>
-                    <Button color="inherit" disabled={save.isPending} onClick={() => save.mutate({ suggestion: selectedSuggestion, value: draftValues[selectedSuggestion.id] ?? '', status: 'rejected' })}>暂不采用此项</Button>
+                    }}>{save.isPending ? '保存中…' : selectedTarget?.kind === 'signature' ? '确认已线下签字 / 盖章' : nextPending ? '确认并处理下一项' : '保存并确认'}</Button>
+                    <Button color="inherit" disabled={drafting || save.isPending} onClick={() => save.mutate({ suggestion: selectedSuggestion, value: draftValues[selectedSuggestion.id] ?? '', status: 'rejected' })}>暂不采用此项</Button>
                     {nextPending && <Button disabled={save.isPending} onClick={() => setSelectedTargetId(nextPending.id)}>下一处待处理</Button>}
                   </Stack>
-                  {selectedTarget && <Stack direction="row" gap={1}><Button size="small" disabled={!renderedPages.some((page) => page.id === selectedTarget.page_id)} onClick={() => setEditingTarget(selectedTarget)}>编辑字段与位置</Button><Button size="small" color="error" onClick={() => setDeletingTarget(selectedTarget)}>移除此位置</Button></Stack>}
+                  {selectedTarget && <Stack direction="row" gap={1}><Button size="small" disabled={drafting || !renderedPages.some((page) => page.id === selectedTarget.page_id)} onClick={() => setEditingTarget(selectedTarget)}>编辑字段与位置</Button><Button size="small" color="error" disabled={drafting} onClick={() => setDeletingTarget(selectedTarget)}>移除此位置</Button></Stack>}
                 </Stack>
               </Paper>
             )}
@@ -345,7 +359,7 @@ export default function FillPanel({ runId, projectId }: Props) {
                   </Button>
                 )}
               </Stack>
-              {previewMode === 'original' && selectedPage ? <PageViewer page={selectedPage} /> : selectedAsset ? (
+              {previewMode === 'original' && selectedPage ? <PageViewer page={selectedPage} highlight={selectedTarget ? { page_id: selectedTarget.page_id, bbox_json: selectedTarget.bbox_json, quote: selectedTarget.label } : undefined} /> : selectedAsset ? (
                 <AnnotatedImage asset={selectedAsset} />
               ) : (
                 <Box sx={{ p: 5, bgcolor: '#f0ece2', textAlign: 'center' }}>

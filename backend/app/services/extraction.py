@@ -68,8 +68,24 @@ class ExtractedRequirement(BaseModel):
         return value.strip()
 
 
+class ReadingFact(BaseModel):
+    section: Literal["overview", "timeline", "contract"]
+    title: str
+    content: str
+    block_id: str
+    quote: str
+
+    @field_validator("title", "content", "quote")
+    @classmethod
+    def non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("解读内容及原文引用不得为空")
+        return value.strip()
+
+
 class ExtractedRequirements(BaseModel):
     requirements: list[ExtractedRequirement] = Field(default_factory=list)
+    reading_items: list[ReadingFact] = Field(default_factory=list)
     coverage_notes: list[str] = Field(default_factory=list)
 
 
@@ -85,13 +101,18 @@ EXTRACTION_SYSTEM = """你是招投标文件要求提取器。
 5. 区分证据匹配、文件提交、技术响应、商务响应、待办和人工判断。
 
 不要编造要求。无法定位的内容不要输出。
-condition_json 可用 all/any 组合条件，叶子类型为 certificate/number/date/material_complete。
+condition_json 可用 all/any 组合条件，叶子类型为
+certificate/number/date/material_complete/performance/semantic。
+必须覆盖原文全部子条件（包括主体、范围、例外和提交材料），不得把多条件摘要成单一金额条件。
 多项业绩使用 {"type":"performance","minimum_count":2,"since":"2023-01-01",
 "minimum_amount":500,"unit":"万元","scope":"供货内容",
 "required_materials":["contract","acceptance_certificate"]}，
 时间口径必须区分签约和验收，date_field 使用 contract_date 或 acceptance_date。
 具体数值仅取原文明确要求。纯语义要求使用 {"type":"semantic"}。
-输出保持简短：title 不超过 40 字，statement 不超过 160 字，coverage_notes 为空。"""
+另将项目概况（采购范围、预算/限价、采购人、标段）、关键时间地点、合同交付/验收/付款信息
+放入 reading_items；section 为 overview/timeline/contract。只整理本批原文明示信息，
+每项必须带真实 block_id 和逐字 quote；不得推测金额、时间、评分或供应商能力。
+title 不超过 40 字，statement/content 不超过 160 字，coverage_notes 为空。"""
 
 MAX_BLOCKS_PER_BATCH = 8
 MAX_BATCH_CHARS = 6000
@@ -154,7 +175,7 @@ async def extract_requirements_for_run(
         for document in documents
     ):
         return await _requirements_from_cache(session, run, documents)
-    coverage_notes: list[str] = []
+    coverage_notes: list[str] = list(run.coverage_notes or [])
     created = 0
     seen = set(
         (
@@ -267,7 +288,10 @@ async def extract_requirements_for_run(
     if not seen:
         coverage_notes.append("未提取到任何带可验证原文位置的要求")
     run.coverage_notes = coverage_notes
-    run.status = AnalysisStatus.NEEDS_REVIEW if coverage_notes else AnalysisStatus.COMPLETED
+    run.status = (
+        AnalysisStatus.RUNNING if job_id
+        else AnalysisStatus.NEEDS_REVIEW if coverage_notes else AnalysisStatus.COMPLETED
+    )
     run.stage = "requirements_extracted"
     await session.commit()
     return created, coverage_notes
@@ -287,6 +311,7 @@ async def extract_document_requirements(
         and metadata.get("requirements_text_version", 0) == text_version
     )
     entries = list(metadata.get("extracted_requirements", [])) if same_version else []
+    reading = list(metadata.get("reading_items", [])) if same_version else []
     completed = set(metadata.get("requirement_batches", [])) if same_version else set()
     notes = list(metadata.get("requirement_notes", [])) if same_version else []
     pages = (
@@ -331,6 +356,26 @@ async def extract_document_requirements(
                 job_id=job_id,
                 config_id=config_id,
             )
+            for fact in extracted.reading_items:
+                block = cache.get(fact.block_id)
+                offsets = _quote_offsets(fact.quote, block.text) if block else None
+                if offsets is None:
+                    notes.append(f"第 {page.page_index + 1} 页解读「{fact.title}」引用未匹配")
+                    continue
+                start, end = offsets
+                span = SourceSpan(
+                    document_id=document.id, revision_id=page.revision_id,
+                    page_id=page.id, block_id=block.id, char_start=start, char_end=end,
+                    quote=block.text[start:end], quote_hash=sha256_text(block.text[start:end]),
+                    bbox_json=[block.x0, block.y0, block.x1, block.y1],
+                )
+                session.add(span)
+                await session.flush()
+                entry = {"section": fact.section, "title": fact.title,
+                         "content": fact.content, "source_span_id": span.id}
+                if not any(old["section"] == fact.section and old["content"] == fact.content
+                           for old in reading):
+                    reading.append(entry)
             for item in extracted.requirements:
                 block = cache.get(item.block_id)
                 offsets = _quote_offsets(item.quote, block.text) if block else None
@@ -370,6 +415,9 @@ async def extract_document_requirements(
                 "requirements_revision": document.current_revision_id,
                 "requirements_text_version": text_version,
                 "extracted_requirements": entries,
+                "reading_items": reading,
+                "reading_revision": document.current_revision_id,
+                "reading_text_version": text_version,
                 "requirement_batches": sorted(completed),
                 "requirement_notes": list(dict.fromkeys(notes)),
             }
@@ -379,6 +427,9 @@ async def extract_document_requirements(
         "requirements_revision": document.current_revision_id,
         "requirements_text_version": text_version,
         "extracted_requirements": entries,
+        "reading_items": reading,
+        "reading_revision": document.current_revision_id,
+        "reading_text_version": text_version,
         "requirement_notes": list(dict.fromkeys(notes)),
     }
     await session.commit()
@@ -397,7 +448,7 @@ async def _requirements_from_cache(
             )
         ).scalars()
     )
-    notes = []
+    notes = list(run.coverage_notes or [])
     created = 0
     for document in documents:
         metadata = document.metadata_json or {}
@@ -419,6 +470,7 @@ async def _requirements_from_cache(
             created += 1
     if not seen:
         notes.append("未提取到带原文依据的要求，请核对招标文件")
+    notes = list(dict.fromkeys(notes))
     run.coverage_notes = notes
     await session.commit()
     return created, notes
@@ -500,8 +552,8 @@ async def _extract_batch(
         session,
         system=EXTRACTION_SYSTEM,
         user=(
-            "请分析以下文本块，只提取 actionable requirements。"
-            "完整提取行动要求，没有要求返回空数组。"
+            "请分析以下文本块，提取行动要求，以及有出处的项目概况、时间节点和合同信息。"
+            "行动要求放 requirements，背景信息放 reading_items；各自没有内容时返回空数组。"
             "quote 只引用足以证明该要求的原文，不要复述整段原文。\n"
             f"{json.dumps(page_payload, ensure_ascii=False)}"
         ),

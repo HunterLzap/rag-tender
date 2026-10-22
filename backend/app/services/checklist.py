@@ -9,10 +9,13 @@ from app.models import (
     CheckSeverity,
     Decision,
     DecisionStatus,
+    Document,
     FillPlan,
     FillSuggestion,
     FillTarget,
+    Page,
     SuggestionStatus,
+    TableCell,
 )
 
 
@@ -84,44 +87,40 @@ async def build_checklist(
 
     fill_rows = (
         await session.execute(
-            select(FillSuggestion, FillTarget)
-            .join(FillTarget, FillTarget.id == FillSuggestion.target_id)
+            select(FillSuggestion, FillTarget, Document, Page, TableCell)
+            .select_from(FillTarget)
+            .outerjoin(FillSuggestion, FillSuggestion.target_id == FillTarget.id)
             .join(FillPlan, FillPlan.id == FillTarget.plan_id)
-            .where(
-                FillPlan.run_id == run_id,
-            )
+            .join(Document, Document.id == FillPlan.document_id)
+            .join(Page, Page.id == FillTarget.page_id)
+            .outerjoin(TableCell, TableCell.id == FillTarget.table_cell_id)
+            .where(FillPlan.run_id == run_id)
         )
     ).all()
-    groups: dict[str, list] = {}
-    for suggestion, target in fill_rows:
-        title = f"确认填写：{target.label}"
-        groups.setdefault(title, []).append((suggestion, target))
-    for title, rows in groups.items():
-        reviewed = all(
-            suggestion.status in {
-                SuggestionStatus.ACCEPTED,
-                SuggestionStatus.EDITED,
-                SuggestionStatus.REJECTED,
-            }
-            for suggestion, _target in rows
-        )
-        fill_existing = next((item for item in items if item.title == title), None)
-        if fill_existing is None and not reviewed:
-            suggestion, target = rows[0]
-            item = ChecklistItem(
-                run_id=run_id,
-                requirement_id=target.requirement_id,
-                title=title,
-                detail=suggestion.rationale,
-                severity=CheckSeverity.WARNING,
-            )
+    by_target = {item.fill_target_id: item for item in stored if item.fill_target_id}
+    current_target_ids = set()
+    for suggestion, target, document, page, cell in fill_rows:
+        current_target_ids.add(target.id)
+        reviewed = bool(suggestion and suggestion.status in {
+            SuggestionStatus.ACCEPTED, SuggestionStatus.EDITED, SuggestionStatus.REJECTED,
+        })
+        item = by_target.get(target.id)
+        if item is None:
+            item = ChecklistItem(run_id=run_id, fill_target_id=target.id,
+                                 severity=CheckSeverity.WARNING)
             session.add(item)
             items.append(item)
-            fill_existing = item
-        if fill_existing is not None:
-            fill_existing.completed = reviewed
+        position = f"{document.filename} · 第 {page.page_index + 1} 页"
+        if cell:
+            position += f" · 第 {cell.row_index + 1} 行第 {cell.col_index + 1} 列"
+        item.title = f"确认填写：{target.label}"
+        item.detail = position + (f"；{suggestion.rationale}" if suggestion else "；尚未起草")
+        item.requirement_id = target.requirement_id
+        item.completed = reviewed
     for item in list(items):
-        if item.title.startswith("确认填写：") and item.title not in groups:
+        if (item.fill_target_id or item.title.startswith("确认填写：")) and (
+            item.fill_target_id not in current_target_ids
+        ):
             await session.delete(item)
             items.remove(item)
 

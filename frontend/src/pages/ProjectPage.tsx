@@ -140,19 +140,26 @@ export default function ProjectPage() {
   function openValue(value: ResponseValue | null = null, label = '') {
     setError(''); setEditingValue(value); setValueLabel(value?.label ?? label); setValueText(value?.value_text ?? ''); setValueOpen(true);
   }
-  async function handleUpload(file: File) {
+  async function handleUpload(files: FileList) {
     setError(''); setUploading(true);
-    try { await uploadDocument(projectId, role, file); setMessage(runtime.data?.live_model_calls ? '文件已上传，处理完成后将自动对标' : '文件已上传，自动解析后等待启用 AI'); await refresh(); }
-    catch (err) { setError(apiError(err, '上传失败')); }
-    finally { setUploading(false); if (fileRef.current) fileRef.current.value = ''; }
+    const selectedRole = role;
+    let count = 0;
+    const failures: string[] = [];
+    try {
+      for (const file of Array.from(files)) {
+        try { await uploadDocument(projectId, selectedRole, file); count += 1; }
+        catch (err) { failures.push(`${file.name}：${apiError(err, '上传失败')}`); }
+      }
+      if (count) setMessage(`${count} 份文件已上传`);
+      if (failures.length) setError(failures.join('；'));
+    } finally { setUploading(false); if (fileRef.current) fileRef.current.value = ''; await refresh(); }
   }
   const tenders = documents.data?.filter((doc) => ['tender', 'addendum', 'qa'].includes(doc.role)) ?? [];
   const parsedTenders = tenders.filter((doc) => doc.current_revision_id);
   const activeRun = runs.data?.[0];
   const organization = organizations.data?.find((item) => item.id === project.data?.organization_id);
-  const allDocuments = [...(documents.data ?? []), ...(libraryDocuments.data ?? [])];
   const materialsReady = parsedTenders.length > 0 && !tenders.some((doc) => !doc.current_revision_id || ['queued', 'running', 'failed'].includes(doc.parse_status));
-  const aiReady = allDocuments.every((doc) => ['ready', 'needs_review'].includes(doc.ai_status));
+  const aiReady = (documents.data ?? []).every((doc) => ['ready', 'needs_review'].includes(doc.ai_status));
   const canAnalyze = materialsReady && aiReady && runtime.data?.live_model_calls && !['draft', 'running'].includes(activeRun?.status ?? '');
   if (project.isLoading) return <EmptyState title="正在加载项目信息" loading />;
   if (project.isError) return <Alert severity="error">项目不存在或暂时无法加载。<Button component={Link} to="/">返回项目列表</Button></Alert>;
@@ -161,9 +168,10 @@ export default function ProjectPage() {
     <Stack spacing={2}>
       <PageHeader title={project.data?.name ?? '项目资料'} actions={<>
         <Button color="inherit" onClick={openInfo}>项目信息</Button>
+        <Button component={Link} to={`/projects/${projectId}/interpretation`}>标书解读</Button>
         {activeRun
           ? <Button variant="contained" component={Link} to={`/runs/${activeRun.id}?tab=requirements`}>进入工作台</Button>
-          : <Button variant="contained" disabled={!canAnalyze || analyze.isPending} onClick={() => analyze.mutate('model')}>{runtime.data?.live_model_calls ? '立即对标' : 'AI 待启用'}</Button>}
+          : <Button variant="contained" disabled={!canAnalyze || analyze.isPending} onClick={() => analyze.mutate('model')}>立即对标</Button>}
         <IconButton aria-label="更多项目操作" onClick={(event) => setActionMenu(event.currentTarget)}><MoreHorizRounded /></IconButton>
       </>} />
       <Notice message={message} onClose={() => setMessage('')} />
@@ -171,7 +179,7 @@ export default function ProjectPage() {
       <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'flex-start', sm: 'center' }} sx={{ px: 2, py: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
           <Button color="inherit" size="small" onClick={openInfo}>{organization?.name ?? '选择投标企业'}</Button>
-          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>{!project.data?.organization_id ? '关联企业后复用资料库' : !runtime.data?.live_model_calls ? '开发阶段 · 解析后等待启用 AI' : !project.data?.auto_analyze ? '自动对标已暂停' : !materialsReady ? '上传招标文件后自动处理' : !aiReady ? '资料正在入库，完成后自动对标' : activeRun ? '资料更新后自动重新对标' : '资料已就绪，等待自动对标'}</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>{!project.data?.organization_id ? '关联企业后复用资料库' : !project.data?.auto_analyze ? '自动对标已暂停' : !materialsReady ? '上传招标文件后自动处理' : !aiReady ? '资料处理完成后自动对标' : activeRun ? '资料更新后自动重新对标' : '资料已就绪，等待自动对标'}</Typography>
           {project.data?.organization_id && <Button size="small" component={Link} to={`/library?organization=${project.data.organization_id}`}>管理企业材料</Button>}
         </Stack>
         <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ sm: 'center' }} justifyContent="space-between" gap={1} sx={{ px: 2, borderBottom: '1px solid', borderColor: 'divider' }}>
@@ -186,7 +194,7 @@ export default function ProjectPage() {
             {section === 'values' && <Button startIcon={<AddRounded />} onClick={() => openValue()}>新增资料</Button>}
           </Stack>
         </Stack>
-        <input ref={fileRef} hidden type="file" aria-label="选择项目文件" accept=".pdf,.doc,.docx,.xlsx,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleUpload(file); }} />
+        <input ref={fileRef} hidden type="file" multiple aria-label="选择项目文件" accept=".pdf,.doc,.docx,.xlsx,.csv" onChange={(event) => { const files = event.target.files; if (files?.length) void handleUpload(files); }} />
         {section === 'files' && <>
           {documents.isLoading ? <EmptyState title="正在加载文件" loading /> : !documents.data?.length ? <EmptyState title="上传第一份招标文件" action={<Button variant="outlined" onClick={() => { setRole('tender'); fileRef.current?.click(); }}>选择文件</Button>} /> : <TableContainer><Table aria-label="项目文件"><TableHead><TableRow><TableCell>文件</TableCell><TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>用途</TableCell><TableCell>状态</TableCell><TableCell align="right" sx={{ width: 52 }} /></TableRow></TableHead><TableBody>{documents.data.map((doc) => <TableRow key={doc.id} hover>
             <TableCell sx={{ minWidth: 0, maxWidth: 480 }}><Button disabled={!doc.current_revision_id} color="inherit" onClick={() => { setPreview(doc); setPreviewPage(''); }} sx={{ p: 0, minHeight: 0, justifyContent: 'flex-start', whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'left', fontWeight: 600 }}>{doc.filename}</Button><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>{doc.current_revision_id ? `${doc.page_count} 页 · ` : ''}{formatBytes(doc.file_size)}<Box component="span" sx={{ display: { md: 'none' } }}> · {roleLabels[doc.role]}</Box></Typography>{doc.parse_error && <Typography variant="caption" color="error.main" display="block" sx={{ mt: 0.5 }}>{doc.parse_error}</Typography>}</TableCell>
@@ -209,7 +217,7 @@ export default function ProjectPage() {
       </Paper>
       <Menu anchorEl={actionMenu} open={Boolean(actionMenu)} onClose={() => setActionMenu(null)}>
         <MenuItem disabled={!materialsReady || analyze.isPending} onClick={() => { setActionMenu(null); analyze.mutate('manual'); }}>新建人工工作台</MenuItem>
-        <MenuItem disabled={!canAnalyze || analyze.isPending} onClick={() => { setActionMenu(null); analyze.mutate('model'); }}>重新自动对标{!runtime.data?.live_model_calls ? '（AI 暂停）' : ''}</MenuItem>
+        <MenuItem disabled={!canAnalyze || analyze.isPending} onClick={() => { setActionMenu(null); analyze.mutate('model'); }}>重新自动对标</MenuItem>
         <MenuItem component={Link} to={`/projects/${projectId}/evidence`}>证据资料</MenuItem>
       </Menu>
       <Menu anchorEl={fileMenu?.anchor} open={Boolean(fileMenu)} onClose={() => setFileMenu(null)}>
@@ -217,7 +225,7 @@ export default function ProjectPage() {
         <MenuItem component="a" href={`/api/v2/documents/${fileMenu?.document.id}/file`} onClick={() => setFileMenu(null)}>下载原文件</MenuItem>
         <MenuItem onClick={() => { const doc = fileMenu!.document; setEditingDoc(doc); setDocName(doc.filename); setDocRole(doc.role); setError(''); setFileMenu(null); }}>编辑文件信息</MenuItem>
         <MenuItem disabled={reparse.isPending || ['queued', 'running'].includes(fileMenu?.document.parse_status ?? '')} onClick={() => { reparse.mutate(fileMenu!.document); setFileMenu(null); }}>重新解析</MenuItem>
-        <MenuItem disabled={!runtime.data?.live_model_calls || !fileMenu?.document.current_revision_id || ['queued', 'running'].includes(fileMenu?.document.ai_status ?? '') || reprocess.isPending} onClick={() => { reprocess.mutate(fileMenu!.document); setFileMenu(null); }}>继续 AI 处理</MenuItem>
+        <MenuItem disabled={!runtime.data?.live_model_calls || !fileMenu?.document.current_revision_id || ['queued', 'running', 'failed', 'canceled'].includes(fileMenu?.document.parse_status ?? '') || ['queued', 'running'].includes(fileMenu?.document.ai_status ?? '') || reprocess.isPending} onClick={() => { reprocess.mutate(fileMenu!.document); setFileMenu(null); }}>继续 AI 处理</MenuItem>
         {fileMenu?.document.role === 'evidence' && <MenuItem disabled={!project.data?.organization_id || share.isPending} onClick={() => { share.mutate(fileMenu!.document); setFileMenu(null); }}>移入企业资料库</MenuItem>}
         <Divider />
         <MenuItem sx={{ color: 'error.main' }} onClick={() => { const doc = fileMenu!.document; setDeleting({ path: `/documents/${doc.id}`, title: '移除文件？', description: `将移除「${doc.filename}」。被引用的文件需先处理关联记录。` }); setFileMenu(null); }}>删除</MenuItem>

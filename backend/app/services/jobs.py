@@ -81,7 +81,7 @@ async def enqueue(session: AsyncSession, kind: str, payload: dict[str, Any]) -> 
 
         plan = await session.get(FillPlan, payload["plan_id"])
         run = await session.get(AnalysisRun, plan.run_id)
-        job.payload = {**job.payload, "project_id": run.project_id}
+        job.payload = {**job.payload, "project_id": run.project_id, "run_id": run.id}
     session.add(job)
     await session.flush()
     return job
@@ -134,6 +134,12 @@ async def claim_job(session: AsyncSession, worker_id: str, lease_seconds: int) -
 
 async def recover_expired_jobs(session: AsyncSession) -> int:
     now = utcnow()
+    canceled = (await session.execute(select(Job).where(
+        Job.status == JobStatus.RUNNING, Job.cancel_requested.is_(True),
+        Job.lease_until.is_not(None), Job.lease_until < now,
+    ))).scalars().all()
+    for job in canceled:
+        await finish_canceled_job(session, job)
     result = await session.execute(
         update(Job)
         .where(
@@ -163,6 +169,7 @@ async def fail_exhausted_jobs(session: AsyncSession) -> int:
             Job.lease_until.is_not(None),
             Job.lease_until < now,
             Job.attempts >= Job.max_attempts,
+            Job.cancel_requested.is_(False),
         )
         .values(
             status=JobStatus.FAILED,
@@ -212,44 +219,50 @@ async def fail_exhausted_jobs(session: AsyncSession) -> int:
     return len(failed)
 
 
+async def finish_canceled_job(session: AsyncSession, job: Job) -> None:
+    job.status = JobStatus.CANCELED
+    job.stage = "已取消"
+    job.finished_at = utcnow()
+    if job.kind == "analyze_project":
+        run = await session.get(AnalysisRun, job.payload.get("run_id"))
+        if run:
+            run.status = AnalysisStatus.FAILED
+            run.stage = "analysis_canceled"
+            run.error = "任务已取消"
+            run.finished_at = utcnow()
+    elif job.kind == "parse_document":
+        document = await session.get(Document, job.payload.get("document_id"))
+        if document:
+            document.metadata_json = {
+                **(document.metadata_json or {}),
+                "parse_status": "canceled",
+                "parse_error": "解析任务已取消",
+            }
+    elif job.kind == "process_document":
+        document = await session.get(Document, job.payload.get("document_id"))
+        if document:
+            document.metadata_json = {
+                **document.metadata_json,
+                "ai_status": "canceled",
+                "ai_error": "任务已取消",
+            }
+    elif job.kind == "draft_fill_plan":
+        from app.models import FillPlan
+
+        plan = await session.get(FillPlan, job.payload.get("plan_id"))
+        if plan:
+            plan.status = "canceled"
+    job.lease_owner = None
+    job.lease_until = None
+
+
 async def request_cancel(session: AsyncSession, job_id: str) -> Job:
     job = await session.get(Job, job_id)
     if job is None:
         raise ValueError("任务不存在")
     job.cancel_requested = True
     if job.status == JobStatus.QUEUED:
-        job.status = JobStatus.CANCELED
-        job.stage = "已取消"
-        job.finished_at = utcnow()
-        if job.kind == "analyze_project":
-            run = await session.get(AnalysisRun, job.payload.get("run_id"))
-            if run:
-                run.status = AnalysisStatus.FAILED
-                run.stage = "analysis_canceled"
-                run.error = "任务已取消"
-                run.finished_at = utcnow()
-        elif job.kind == "parse_document":
-            document = await session.get(Document, job.payload.get("document_id"))
-            if document:
-                document.metadata_json = {
-                    **(document.metadata_json or {}),
-                    "parse_status": "canceled",
-                    "parse_error": "解析任务已取消",
-                }
-        elif job.kind == "process_document":
-            document = await session.get(Document, job.payload.get("document_id"))
-            if document:
-                document.metadata_json = {
-                    **document.metadata_json,
-                    "ai_status": "canceled",
-                    "ai_error": "任务已取消",
-                }
-        elif job.kind == "draft_fill_plan":
-            from app.models import FillPlan
-
-            plan = await session.get(FillPlan, job.payload.get("plan_id"))
-            if plan:
-                plan.status = "canceled"
+        await finish_canceled_job(session, job)
     await session.commit()
     return job
 

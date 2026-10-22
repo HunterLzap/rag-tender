@@ -23,7 +23,6 @@ export default function SettingsPage() {
   const [isActive, setIsActive] = useState(true);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const runtime = useQuery({ queryKey: ['runtime'], queryFn: async () => (await api.get<{ live_model_calls: boolean }>('/health')).data });
   const configs = useQuery({ queryKey: ['model-configs'], queryFn: async () => (await api.get<ModelConfig[]>('/model-configs')).data });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['model-configs'] });
   const set = (key: keyof typeof form, value: string) => setForm((current) => ({ ...current, [key]: value }));
@@ -43,7 +42,7 @@ export default function SettingsPage() {
     },
     onSuccess: async () => {
       setOpen(false); set('api_key', ''); set('embedding_api_key', '');
-      setMessage('配置已加密保存，未执行连接测试'); await refresh();
+      setMessage('配置已保存'); await refresh();
     },
     onError: (err) => setError(apiError(err, '保存配置失败')),
   });
@@ -75,7 +74,6 @@ export default function SettingsPage() {
       <PageHeader title="模型设置" actions={<Button variant="contained" startIcon={<AddRounded />} onClick={() => edit(null)}>新增配置</Button>} />
       <Notice message={message} onClose={() => setMessage('')} />
       {error && !open && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
-      {!runtime.data?.live_model_calls && <Alert severity="info">开发阶段暂停真实调用。可以保存配置，AI 入库与分析将在启用模型后执行。</Alert>}
       <Paper variant="outlined">
         {configs.isLoading ? <EmptyState loading title="正在加载配置" /> : configs.error ? <Alert severity="error" sx={{ m: 2 }}>配置加载失败，请重试。</Alert> : !configs.data?.length ? <EmptyState title="配置主模型和 Embedding 模型" description="主模型需要支持图片输入；两种模型可以使用不同服务商。" action={<Button variant="contained" onClick={() => edit(null)}>新增配置</Button>} /> : <Stack divider={<Divider />}>
           {configs.data.map((config) => <Box key={config.id} sx={{ p: 2.5 }}>

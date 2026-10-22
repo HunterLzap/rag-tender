@@ -18,7 +18,7 @@ from app.config import get_settings
 
 V2_TABLES = {"projects", "documents", "analysis_runs", "fill_suggestions"}
 BASELINE_REVISION = "fcb21467dc21"
-KNOWN_REVISIONS = {BASELINE_REVISION, "a19b2f0e71d4", "c82a7e4d190f"}
+KNOWN_REVISIONS = {BASELINE_REVISION, "a19b2f0e71d4", "c82a7e4d190f", "d61e3a47b209"}
 
 
 async def _table_names() -> set[str]:

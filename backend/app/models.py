@@ -678,6 +678,9 @@ class ChecklistItem(Base, TimestampMixin):
     requirement_id: Mapped[str | None] = mapped_column(
         ForeignKey("requirements.id", ondelete="SET NULL")
     )
+    fill_target_id: Mapped[str | None] = mapped_column(
+        ForeignKey("fill_targets.id", ondelete="SET NULL")
+    )
     title: Mapped[str] = mapped_column(String(500))
     detail: Mapped[str | None] = mapped_column(Text)
     severity: Mapped[CheckSeverity] = mapped_column(

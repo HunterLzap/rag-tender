@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   AppBar, Box, Breadcrumbs, Button, Chip, Collapse, Divider, Drawer, IconButton,
   Link as MuiLink, List, ListItemButton, ListItemIcon, ListItemText, Stack,
-  Toolbar, Typography,
+  Toolbar, Tooltip, Typography,
 } from '@mui/material';
 import ArticleOutlined from '@mui/icons-material/ArticleOutlined';
 import DashboardOutlined from '@mui/icons-material/DashboardOutlined';
@@ -45,19 +45,17 @@ export default function Shell() {
     queryFn: async () => (await api.get<AnalysisRun[]>(`/projects/${projectId}/analysis-runs`)).data,
   });
   const latestRunId = runId ?? projectRuns.data?.[0]?.id;
-  const runtime = useQuery({
-    queryKey: ['runtime'],
-    queryFn: async () => (await api.get<{ live_model_calls: boolean }>('/health')).data,
-  });
   const tab = new URLSearchParams(location.search).get('tab') ?? 'requirements';
   const sectionTitle = location.pathname === '/' ? '全部项目'
     : location.pathname === '/library' ? '企业资料库'
       : location.pathname === '/settings' ? '模型设置'
       : location.pathname.endsWith('/evidence') ? '证据资料'
+        : location.pathname.endsWith('/interpretation') ? '标书解读'
         : runId ? ({ requirements: '要求核对', fill: '填写建议', checklist: '检查导出' }[tab] ?? '要求核对')
           : location.hash === '#history' ? '分析记录' : location.hash === '#library' ? '企业材料' : '资料准备';
   const submenus = [
-    { label: '资料准备', to: `/projects/${projectId}`, selected: Boolean(routeProjectId && !location.pathname.endsWith('/evidence') && location.hash !== '#history') },
+    { label: '资料准备', to: `/projects/${projectId}`, selected: Boolean(routeProjectId && location.pathname === `/projects/${projectId}` && location.hash !== '#history') },
+    { label: '标书解读', to: `/projects/${projectId}/interpretation`, selected: location.pathname.endsWith('/interpretation') },
     { label: '要求核对', to: latestRunId ? `/runs/${latestRunId}?tab=requirements` : `/projects/${projectId}`, selected: Boolean(runId && tab === 'requirements'), disabled: !latestRunId },
     { label: '填写建议', to: latestRunId ? `/runs/${latestRunId}?tab=fill` : `/projects/${projectId}`, selected: Boolean(runId && tab === 'fill'), disabled: !latestRunId },
     { label: '检查导出', to: latestRunId ? `/runs/${latestRunId}?tab=checklist` : `/projects/${projectId}`, selected: Boolean(runId && tab === 'checklist'), disabled: !latestRunId },
@@ -87,10 +85,14 @@ export default function Shell() {
             <Collapse in={projectOpen}>
               <List component="div" disablePadding sx={{ ml: 2.25, pl: 1, borderLeft: '1px solid', borderColor: 'divider' }}>
                 {submenus.map((item) => (
-                  <ListItemButton key={item.label} component={Link} to={item.to} selected={item.selected} disabled={item.disabled} onClick={() => setMobileOpen(false)} sx={{ ...navStyle, py: 0.6, pl: 2 }} aria-current={item.selected ? 'page' : undefined}>
+                  <Tooltip key={item.label} title={item.disabled ? '先上传招标文件，再从项目更多菜单创建人工工作台；启用 AI 后可自动对标。' : ''} placement="right">
+                  <Box component="span" display="block">
+                  <ListItemButton component={Link} to={item.to} selected={item.selected} disabled={item.disabled} onClick={() => setMobileOpen(false)} sx={{ ...navStyle, py: 0.6, pl: 2 }} aria-current={item.selected ? 'page' : undefined}>
                     <ListItemText primary={item.label} primaryTypographyProps={{ fontSize: 13 }} />
                     {item.selected && <Box sx={{ width: 5, height: 5, borderRadius: '50%', bgcolor: 'primary.main' }} />}
                   </ListItemButton>
+                  </Box>
+                  </Tooltip>
                 ))}
               </List>
             </Collapse>
@@ -123,7 +125,6 @@ export default function Shell() {
               {projectId && <MuiLink component={Link} to={`/projects/${projectId}`} underline="hover" color="text.secondary" sx={{ display: 'block', maxWidth: { xs: 95, sm: 250 }, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>{project.data?.name ?? '当前项目'}</MuiLink>}
               <Typography color="text.primary" fontSize={13} aria-current="page">{sectionTitle}</Typography>
             </Breadcrumbs>
-            {runtime.data && <Chip label={runtime.data.live_model_calls ? 'AI 已启用' : '开发 · AI 暂停'} variant="outlined" sx={{ display: { xs: 'none', sm: 'inline-flex' }, bgcolor: '#F9FAFB', borderColor: 'divider', color: 'text.secondary', mr: 1 }} />}
             <IconButton aria-label="打开操作指南" onClick={() => setHelpOpen(true)}><HelpOutlineRounded fontSize="small" /></IconButton>
           </Toolbar>
         </AppBar>
@@ -146,7 +147,8 @@ export default function Shell() {
           <Typography variant="body2" color="text.secondary">项目内上传招标文件、补遗、答疑和投标模板；企业证明材料统一在「企业资料库」上传。项目选择企业即可引用材料，无需重复上传。</Typography>
           <Typography variant="subtitle2">状态怎么理解？</Typography>
           <Stack direction="row" gap={1} flexWrap="wrap"><Chip color="success" label="绿色 · 已完成 / 已确认" /><Chip color="warning" label="黄色 · 待补充 / 待复核" /><Chip color="error" label="红色 · 不符合 / 未完成" /></Stack>
-          <Typography variant="body2" color="text.secondary">开发阶段只解析和保存文件，AI 入库和分析暂停。客户启用模型后按自动流程运行；人工工作台保留在项目更多菜单中。</Typography>
+          <Typography variant="subtitle2">处理失败后怎么继续？</Typography>
+          <Typography variant="body2" color="text.secondary">材料可从操作菜单继续 AI 处理；分析失败可在工作台选择「继续本次分析」；填写中断可选择「继续起草」。已保存的结果会保留，资料变化后需重新核对。失败任务不会自动重试。</Typography>
           <Button variant="outlined" onClick={() => setHelpOpen(false)}>我知道了，继续操作</Button>
         </Stack>
       </Drawer>

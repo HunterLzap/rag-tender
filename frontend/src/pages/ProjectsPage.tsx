@@ -116,7 +116,7 @@ export default function ProjectsPage() {
         </Stack></DialogContent>
         <DialogActions><Button onClick={() => setOpen(false)}>取消</Button><Button variant="contained" disabled={!name.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? '保存中…' : editing ? '保存修改' : '创建并准备资料'}</Button></DialogActions>
       </Dialog>
-      <ConfirmDialog open={Boolean(deleting)} title="删除项目？" description={`将删除「${deleting?.name ?? ''}」及其文件记录、分析结果、填写建议和证据资料。此操作无法撤销。`} pending={remove.isPending} onClose={() => setDeleting(null)} onConfirm={() => remove.mutate()} />
+      <ConfirmDialog open={Boolean(deleting)} title="删除项目？" description={`将删除「${deleting?.name ?? ''}」的项目文件、分析结果、填写建议及项目专属证据。企业资料库的共享材料和事实保留。此操作无法撤销。`} pending={remove.isPending} onClose={() => setDeleting(null)} onConfirm={() => remove.mutate()} />
     </Stack>
   );
 }

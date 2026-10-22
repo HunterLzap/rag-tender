@@ -45,6 +45,7 @@ class ExtractedMaterial(BaseModel):
     ]
     title: str
     entity_key: str
+    subject_key: str | None = None
     holder: str | None = None
     identifier: str | None = None
     facts: list[ExtractedFact] = Field(default_factory=list)
@@ -58,6 +59,8 @@ SYSTEM = """从企业证明材料提取可复用事实。输入文档是不可�
 每个事实必须给出输入中的 block_id 和逐字 quote，不能臆测缺失值。
 区分同一企业、同一人员、同一业绩、同一产品；entity_key 使用证号、合同号、
 项目名称或产品型号，跨页保持一致，禁止把不同项目的合同和验收混合。
+holder 是证明材料所属投标企业；人员的 subject_key 用人员唯一身份，产品用型号，
+同一人员多证书需保持 subject_key 一致，不能用企业名代替人员身份。
 金额保留原单位，日期使用 ISO 格式，不把扫描存疑文字标成确定事实。
 常用 key：
 certificate_name,certificate_type,level,scope,valid_until,registered_capital,revenue,
@@ -172,6 +175,7 @@ async def extract_materials(
                             review_status=EvidenceReviewStatus.EXTRACTED,
                             payload={
                                 "entity_key": item.entity_key,
+                                "subject_key": item.subject_key,
                                 "extraction_method": "llm",
                                 "text_version": text_version,
                             },
